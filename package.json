@@ -10,6 +10,8 @@
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
+    "desktop": "npm --prefix apps/desktop start",
+    "desktop:pack:win": "npm --prefix apps/desktop run pack:windows",
     "test": "node --test tests/*.test.ts",
     "check:i18n": "node scripts/check-i18n.mjs",
     "check:browser-locale": "node scripts/check-browser-locale.mjs",

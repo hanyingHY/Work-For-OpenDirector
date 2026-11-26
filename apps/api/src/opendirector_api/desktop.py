@@ -72,17 +72,45 @@ CONTROL = TypeAdapter(Annotated[Control | SessionRegistration, Field(discriminat
 
 def runtime_check() -> dict[str, str]:
     from opendirector.agent.native import executable
+    from opendirector.application.media_probe import find_media_binary
     from opendirector.installation import web_root
+
+    dev_mode = os.environ.get('OPENDIRECTOR_DESKTOP_DEV') == '1'
     if not (web_root() / 'index.html').is_file():
-        raise RuntimeError('Web resources are missing.')
-    commands = {'agent': executable('default'), 'ffmpeg': shutil.which('ffmpeg'), 'ffprobe': shutil.which('ffprobe')}
+        raise RuntimeError(
+            'Web resources are missing. Run `npm run build` first.' if dev_mode else 'Web resources are missing.'
+        )
+
+    ffmpeg_path = find_media_binary('ffmpeg') or shutil.which('ffmpeg')
+    ffprobe_path = find_media_binary('ffprobe') or shutil.which('ffprobe')
+    agent_path = None
+    try:
+        agent_path = executable('default')
+    except Exception:
+        if not dev_mode:
+            raise
+
+    commands = {'agent': agent_path, 'ffmpeg': ffmpeg_path, 'ffprobe': ffprobe_path}
     versions = {'python': sys.version.split()[0]}
+    sub_kwargs = {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)} if os.name == 'nt' else {}
     for name, path in commands.items():
         if not path:
+            if dev_mode:
+                versions[name] = 'unavailable'
+                continue
             raise RuntimeError(f'{name} is missing from the bundled runtime.')
-        result = subprocess.run([path, '--version' if name == 'agent' else '-version'],
-                                capture_output=True, text=True, timeout=20, check=True)
-        versions[name] = result.stdout.splitlines()[0]
+        try:
+            result = subprocess.run(
+                [path, '--version' if name == 'agent' else '-version'],
+                capture_output=True, text=True, timeout=20, check=True, **sub_kwargs,
+            )
+            lines = result.stdout.splitlines() or result.stderr.splitlines()
+            versions[name] = lines[0] if lines else 'available'
+        except Exception:
+            if dev_mode:
+                versions[name] = 'unavailable'
+                continue
+            raise
     return versions
 
 

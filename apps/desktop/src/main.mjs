@@ -171,13 +171,17 @@ function buildTrayMenu() {
   })));
 }
 
-function createTray() {
-  if (process.platform !== 'win32' || tray || process.argv.includes('--smoke')) return;
+function resolveAppIcon() {
   const candidates = [
     join(here, '..', 'assets', 'tray.png'),
     join(here, '..', '..', '..', 'src', 'assets', 'open_director_logo.png'),
   ];
-  const iconPath = candidates.find(p => existsSync(p));
+  return candidates.find(p => existsSync(p));
+}
+
+function createTray() {
+  if (process.platform !== 'win32' || tray || process.argv.includes('--smoke')) return;
+  const iconPath = resolveAppIcon();
   if (!iconPath) return;
   try {
     const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
@@ -481,25 +485,73 @@ ipcMain.handle('desktop:pick-reference-files', async (event, options = {}) => {
   return { canceled: false, files };
 });
 
-async function start() {
-  menu();
-  handleLaunchTargets(process.argv.slice(1));
-  const manifest = JSON.parse(readFileSync(join(runtime, 'manifest.json'), 'utf8'));
-  if (typeof manifest.python !== 'string' || manifest.python.startsWith('/') || manifest.python.split(/[\\/]/).includes('..')) {
-    throw new Error('Invalid runtime Python path');
+function resolveHostConfig() {
+  const manifestPath = join(runtime, 'manifest.json');
+  const pathSep = process.platform === 'win32' ? ';' : ':';
+  if (existsSync(manifestPath)) {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+    if (typeof manifest.python !== 'string' || manifest.python.startsWith('/') || manifest.python.split(/[\\/]/).includes('..')) {
+      throw new Error('Invalid runtime Python path');
+    }
+    if (manifest.version !== 1 || manifest.platform !== process.platform || manifest.arch !== process.arch) {
+      throw new Error('Runtime platform does not match this application');
+    }
+    return {
+      python: join(runtime, manifest.python),
+      isolated: true,
+      env: {
+        ...process.env,
+        OPENDIRECTOR_ROOT: workspace,
+        PATH: join(runtime, 'bin') + pathSep + (process.env.PATH ?? ''),
+      },
+    };
   }
-  if (manifest.version !== 1 || manifest.platform !== process.platform || manifest.arch !== process.arch) {
-    throw new Error('Runtime platform does not match this application');
+
+  if (app.isPackaged) {
+    throw new Error('Packaged runtime manifest is missing.');
   }
-  host = new Host({
-    python: join(runtime, manifest.python),
-    directory: workspace,
-    log,
+
+  // Local source desktop run (no bundled runtime/ yet): use repo .venv + PYTHONPATH directly.
+  const repoRoot = join(here, '..', '..', '..');
+  const venvPython = process.platform === 'win32'
+    ? join(repoRoot, '.venv', 'Scripts', 'python.exe')
+    : join(repoRoot, '.venv', 'bin', 'python');
+  const python = process.env.OPENDIRECTOR_PYTHON
+    || (existsSync(venvPython) ? venvPython : (process.platform === 'win32' ? 'python' : 'python3'));
+  const sourcePaths = [
+    join(repoRoot, 'packages', 'core', 'src'),
+    join(repoRoot, 'apps', 'api', 'src'),
+    ...(process.env.PYTHONPATH ? [process.env.PYTHONPATH] : []),
+  ].join(pathSep);
+  const extraBins = [
+    join(homedir(), 'bin'),
+    join(repoRoot, '.toolchain', 'ffmpeg', 'bin'),
+  ].filter(dir => existsSync(dir));
+
+  log.write(`desktop-dev: starting local source host with python=${python}\n`);
+  return {
+    python,
+    isolated: false,
     env: {
       ...process.env,
       OPENDIRECTOR_ROOT: workspace,
-      PATH: join(runtime, 'bin') + (process.platform === 'win32' ? ';' : ':') + process.env.PATH,
+      OPENDIRECTOR_DESKTOP_DEV: '1',
+      PYTHONPATH: sourcePaths,
+      PATH: [...extraBins, process.env.PATH ?? ''].filter(Boolean).join(pathSep),
     },
+  };
+}
+
+async function start() {
+  menu();
+  handleLaunchTargets(process.argv.slice(1));
+  const hostConfig = resolveHostConfig();
+  host = new Host({
+    python: hostConfig.python,
+    isolated: hostConfig.isolated,
+    directory: workspace,
+    log,
+    env: hostConfig.env,
     onExit: () => { if (!quitting) void fatal(new Error(text().interrupted)); },
   });
   await host.ready;
@@ -532,12 +584,14 @@ async function start() {
     initialBounds = sanitizeBounds(restored.bounds, displays);
   } catch {}
 
+  const appIcon = resolveAppIcon();
   window = new BrowserWindow({
     ...initialBounds,
     minWidth: 800,
     minHeight: 600,
     show: false,
     title: 'OpenDirector',
+    ...(appIcon ? { icon: appIcon } : {}),
     ...(process.platform === 'darwin' ? {
       titleBarStyle: 'hiddenInset',
       trafficLightPosition: { x: 18, y: 18 },

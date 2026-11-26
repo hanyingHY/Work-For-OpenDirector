@@ -61,3 +61,75 @@ def test_desktop_auth_rejects_websocket_without_accepting_it():
     asyncio.run(DesktopAuthentication(application, token='a' * 64)(
         {'type': 'websocket', 'headers': []}, receive, send))
     assert events == [{'type': 'websocket.close', 'code': 1008}]
+
+
+def test_desktop_dev_host_handshake_serves_embedded_ui_and_clean_shutdown(tmp_path):
+    """Verify the exact local-source Electron Desktop Host handshake (`OPENDIRECTOR_DESKTOP_DEV=1`)."""
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+    from opendirector.installation import web_root
+
+    if not (web_root() / 'index.html').is_file():
+        pytest.skip('dist/index.html not built yet')
+
+    token = 'b' * 64
+    env = {
+        **os.environ,
+        'OPENDIRECTOR_ROOT': str(tmp_path),
+        'OPENDIRECTOR_DESKTOP_DEV': '1',
+        'PATH': f"{Path.home() / 'bin'}:{os.environ.get('PATH', '')}",
+    }
+    proc = subprocess.Popen(
+        [sys.executable, '-B', '-m', 'opendirector_api.desktop'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        assert proc.stdin and proc.stdout
+        proc.stdin.write(json.dumps({'type': 'initialize', 'version': 1, 'token': token}) + '\n')
+        proc.stdin.flush()
+
+        first = json.loads(proc.stdout.readline())
+        assert first == {'type': 'starting', 'version': 1}
+        ready = json.loads(proc.stdout.readline())
+        assert ready['type'] == 'ready', ready
+        base_url = ready['url']
+        assert base_url.startswith('http://127.0.0.1:')
+        assert 'python' in ready['runtime']
+
+        # Unauthenticated request must be blocked with 403
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(f'{base_url}/')
+        assert exc.value.code == 403
+
+        # Authenticated desktop protocol request serves embedded UI & runtime health
+        req_ui = urllib.request.Request(f'{base_url}/', headers={'X-OpenDirector-Desktop': token})
+        with urllib.request.urlopen(req_ui, timeout=5) as resp:
+            assert resp.status == 200
+            html = resp.read().decode('utf-8')
+            assert '<!doctype html>' in html.lower() or '<html' in html.lower()
+
+        req_health = urllib.request.Request(
+            f'{base_url}/api/desktop/runtime-health',
+            headers={'X-OpenDirector-Desktop': token, 'X-OpenDirector-Request': '1'},
+        )
+        with urllib.request.urlopen(req_health, timeout=5) as resp:
+            assert resp.status == 200
+            health = json.loads(resp.read().decode('utf-8'))
+            assert health['status'] == 'ok'
+            assert health['ffmpegAvailable'] is True
+
+        # Clean graceful shutdown via desktop control channel
+        proc.stdin.write(json.dumps({'type': 'shutdown', 'requestId': 1}) + '\n')
+        proc.stdin.close()
+        shutdown = json.loads(proc.stdout.readline())
+        assert shutdown == {'type': 'shutdown-complete'}
+        assert proc.wait(timeout=15) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+

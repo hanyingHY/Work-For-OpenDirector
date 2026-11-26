@@ -35,21 +35,31 @@ OpenDirector for Windows builds directly on upstream `ThinkFlowLab/OpenDirector`
   - **Multi-Branch A/B Compare Lab (`MediaCompareDialog.tsx`)**: One-click 3-branch A/B/C experiment spawner, Split-Slider image compare, side-by-side video review, and one-click winner star tagging.
   - **Production Studio (`ProductionStudioDialog.tsx` + `nle_export.py` + `workflowRecipe.ts`)**: Unified `@Character`/`@Location`/`@Prop` Production Bible editor, industry NLE export (**Premiere Pro / DaVinci Resolve / CapCut FCP7 XML**, frame-accurate **`.srt`**, printable client **Pitch Deck HTML**), Project Budget Guard (`#481`), and credential-free **`.odflow.json`** workflow recipe export/import.
 
-## Quick Start (One-Command Local Launch)
+## Quick Start — Native Windows Desktop App
 
-After pulling this branch locally:
+After pulling this branch on your Windows 10/11 PC:
 
-### Windows (PowerShell)
+### Option A: One-Click Native Windows Desktop Window (Recommended)
+Double-click **`start-windows-desktop.bat`** in File Explorer, or run in PowerShell:
 ```powershell
-.\scripts\start-local.ps1
+.\scripts\start-windows-desktop.ps1
 ```
+This does **not** open a browser tab — it bootstraps the private Python Desktop Host (`.venv` + auto `imageio-ffmpeg`), builds the embedded UI bundle (`dist/`), installs Electron (`apps/desktop`), and opens the **native Windows Electron Desktop Application** with:
+- Windows 10/11 Mica titlebar & OpenDirector app icon
+- Private 64-byte `X-OpenDirector-Desktop` authenticated `opendirector://app/` protocol
+- System Tray, Windows Taskbar export progress, Jump List, `Ctrl+V`/`Ctrl+C` Windows clipboard (`CF_HDROP`), and `#473` native file picker
 
-### macOS / Linux
-```bash
-./scripts/start-local.sh
+> After modifying frontend code under `src/`, pass `-Rebuild`: `.\scripts\start-windows-desktop.ps1 -Rebuild`.
+
+### Option B: Build Standalone Windows x64 Installer (`.exe`)
+```powershell
+# Point to standalone ffmpeg.exe & ffprobe.exe (auto-detected if already on PATH)
+$env:OPENDIRECTOR_FFMPEG_DIR = "C:\ffmpeg\bin"
+.\scripts\build-windows-installer.ps1
 ```
+Output installer: `apps\desktop\build\OpenDirector-v0.5.0-win-x64-unsigned.exe`
 
-The launcher automatically checks Python 3.11+, Node.js 22+, creates `.venv` if missing, installs `imageio-ffmpeg` automatically if system `ffmpeg` is absent, starts the persistent local FastAPI backend on `http://127.0.0.1:8000` and Vite Studio on `http://127.0.0.1:5173`, and opens your browser.
+*(Optional web-only debug launcher for browser dev: `.\scripts\start-local.ps1` / `./scripts/start-local.sh`.)*
 
 ## Local Development & Packaging (Windows x64)
 
