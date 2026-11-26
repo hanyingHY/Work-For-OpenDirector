@@ -1,0 +1,306 @@
+"""Isolated browser fixture API; never points at the user's projects or models.
+
+PYTHONPATH=packages/core/src:apps/api/src python tests/browser/creation_server.py
+"""
+import argparse
+import asyncio
+from dataclasses import replace
+from io import BytesIO
+from pathlib import Path
+import tempfile
+import subprocess
+from urllib.parse import urlsplit
+
+from fastapi import Request
+from PIL import Image
+import uvicorn
+
+from opendirector.domain.projects import ProjectError
+from opendirector.infrastructure.local_projects import LocalProjects
+from opendirector.infrastructure.model_configs import ModelConfigs
+from opendirector_api.main import create_app
+from opendirector.application.tool_operations import TOOLS, Output
+from opendirector.domain.capabilities import Segment, MediaResult
+from opendirector.integrations.model_adapters import OpenAIImages, VllmOmniSegmentation
+from opendirector.integrations.providers import GenerationProviders
+
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--port', type=int, default=8019)
+parser.add_argument('--root', type=Path)
+parser.add_argument('--assistant-fixture', action='store_true', help='Use a gated assistant response without a real model')
+parser.add_argument('--http-generation-fixture', action='store_true',
+                    help='Use real generation adapters against loopback HTTP test servers only')
+args = parser.parse_args()
+root = (args.root or Path(tempfile.mkdtemp(prefix='opendirector-creation-'))).resolve()
+if root.parent != Path(tempfile.gettempdir()).resolve() or not root.name.startswith('opendirector-creation-'):
+    parser.error('Browser fixtures require an opendirector-creation-* directory directly under the system temp directory')
+store = LocalProjects(root)
+configs = ModelConfigs(root)
+# These configurations use the in-process adapters below and have no HTTP
+# capability service. Keep their checks explicit so they do not occupy the
+# bounded query workers used by a browser test's real capability fixture.
+if not configs.list():
+    for kind in ('agent', 'image'):
+        configs.save(kind, 'http://127.0.0.1:12345/v1', f'fixture-{kind}', '',
+                     connection_type='self_hosted', protocol='openai', auth_mode='none', capability_auto_check=False)
+
+# Test-only adapters let the real preview and tool services exercise owned
+# assets, model selection and cancellation without contacting a GPU endpoint.
+if not any(model['kind'] == 'vision' for model in configs.list()):
+    configs.save('vision', 'http://127.0.0.1:12345/v1', 'facebook/sam3', '',
+                 connection_type='self_hosted', protocol='vllm_omni', auth_mode='none', capability_auto_check=False)
+if not any(model['modelId'] == 'Qwen/Qwen-Image-2.1' for model in configs.list()):
+    configs.save('image', 'http://127.0.0.1:12345/v1', 'Qwen/Qwen-Image-2.1', '',
+                 connection_type='self_hosted', protocol='openai', auth_mode='none', capability_auto_check=False)
+selection_gate = asyncio.Event()
+selection_gate.set()
+selection_calls, image_edit_calls = [], []
+selection_active = 0
+
+
+async def fixture_segment(self, config, request):
+    global selection_active
+    selection_calls.append(dict(concept=request.concept, boxes=request.boxes))
+    selection_active += 1
+    try:
+        await selection_gate.wait()
+        await asyncio.sleep(.01)
+        with Image.open(BytesIO(request.image)) as image:
+            width, height = image.size
+        boxes = request.boxes or ((width * .05, height * .1, width * .45, height * .9),
+                                  (width * .55, height * .1, width * .95, height * .9))
+        results = []
+        for box in boxes:
+            box = tuple(round(value) for value in box)
+            mask = Image.new('L', (width, height), 0)
+            mask.paste(255, box)
+            out = BytesIO()
+            mask.save(out, 'PNG')
+            results.append(Segment(out.getvalue(), box, .9))
+        return results
+    finally:
+        selection_active -= 1
+
+
+async def fixture_image_edit(self, config, request, **kwargs):
+    image_edit_calls.append(dict(modelId=config['modelId'], references=len(request.references), prompt=request.prompt))
+    out = BytesIO()
+    Image.new('RGB', (request.width, request.height), 'red').save(out, 'PNG')
+    return MediaResult(out.getvalue(), 'png')
+
+
+VllmOmniSegmentation.segment = fixture_segment
+OpenAIImages.image = fixture_image_edit
+
+
+class FixtureProvider:
+    def __init__(self):
+        self.gate = asyncio.Event()
+        self.gate.set()
+        self.calls = []
+
+    def validate(self, kind, config):
+        if kind not in {'text', 'image', 'video', 'audio'}:
+            raise ProjectError('Unsupported fixture generation kind')
+
+    async def generate(self, config, task, submitted, *, result_ready=None):
+        self.calls.append(dict(id=task['id'], kind=task['kind'], referenceIds=task['referenceIds'], parameters=task['parameters']))
+        await self.gate.wait()
+        await asyncio.sleep(.2)
+        if task['kind'] == 'text':
+            return 'md', ('Fixture generated: ' + task['prompt']).encode('utf-8')
+        if task['kind'] == 'video':
+            data = await asyncio.to_thread(lambda: subprocess.run(
+                ['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'color=c=blue:s=96x64:r=10',
+                 '-t', '1', '-c:v', 'libx264', '-threads', '1', '-pix_fmt', 'yuv420p',
+                 '-movflags', 'frag_keyframe+empty_moov', '-f', 'mp4', 'pipe:1'], capture_output=True, check=True).stdout)
+            return 'mp4', data
+        if task['kind'] == 'audio':
+            data = await asyncio.to_thread(lambda: subprocess.run(
+                ['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
+                 '-t', '0.3', '-threads', '1', '-c:a', 'pcm_s16le', '-f', 'wav', 'pipe:1'], capture_output=True, check=True).stdout)
+            return 'wav', data
+        image = BytesIO()
+        size = tuple(map(int, task['parameters']['size'].split('x'))) if config['modelId'] == 'parameters-image' else (320, 240)
+        Image.new('RGB', size, 'purple').save(image, 'PNG')
+        return 'png', image.getvalue()
+
+
+provider = FixtureProvider()
+http_generation_calls = []
+if args.http_generation_fixture:
+    from opendirector.application import creation_generation
+
+    class HttpFixtureProvider(GenerationProviders):
+        """Exercise request preparation and saved remote IDs with a local test service."""
+        def __init__(self, media):
+            super().__init__(media, poll_interval=.05)
+
+        def validate(self, kind, config):
+            target = urlsplit(config['url'])
+            if target.scheme != 'http' or target.hostname != '127.0.0.1':
+                raise ProjectError('HTTP browser fixtures require a loopback test service')
+            super().validate(kind, config)
+
+        async def generate(self, config, task, submitted, *, result_ready=None):
+            self.validate(task['kind'], config)
+            http_generation_calls.append(dict(id=task['id'], kind=task['kind']))
+            return await super().generate(config, task, submitted, result_ready=result_ready)
+
+    # Preserve the runtime's ProviderMedia wiring for frozen continuation inputs.
+    creation_generation.GenerationProviders = HttpFixtureProvider
+assistant_gate = asyncio.Event()
+assistant_gate.set()
+assistant_contexts = []
+if args.assistant_fixture:
+    from opendirector_api import agent
+
+    async def fixture_agent(self, run):
+        assistant_contexts.append(run.messages)
+        first_line = run.messages[-1]['content'].partition('\n')[0]
+        if first_line == '建议回复验收':
+            yield {'type': 'delta', 'text': (
+                '- 展开海边重逢的完整分镜\n'
+                '- 换一个安静克制的结尾\n'
+                '- 补一版黄昏海边的视觉参考\n'
+                f'- {"补充整份分镜的镜头和对白" * 8}\n\n'
+                '[opendirector-replies]: #'
+            )}
+            await assistant_gate.wait()
+            return
+        if getattr(run, 'mode', 'build') == 'plan':
+            yield {'type': 'delta', 'text': (
+                '### 规划模式分镜提案（只读）\n'
+                '1. **开场航拍**：雨夜霓虹港口缓慢推进，建立孤独氛围。\n'
+                '2. **人物特写**：雨滴滑落护目镜，视线聚焦旧怀表。\n'
+                '3. **情绪收尾**：双人背影面向灯塔，钢琴主题切入。\n\n'
+                '当前为只读规划模式，服务端已锁定画布写入。确认方案后可点击下方按钮切换到执行模式。'
+            )}
+            await assistant_gate.wait()
+            return
+        if first_line.startswith('执行搭建') or first_line.startswith('Build shot'):
+            from uuid import uuid4
+            from opendirector.domain.creation.commands import parse_command
+            spec_id, item_id = uuid4(), uuid4()
+            cmd = parse_command(dict(
+                commandId=uuid4(),
+                projectId=run.project_id,
+                type='creation.batch',
+                expectedVersions=[],
+                payload=dict(operations=[
+                    dict(type='generationSpec.create', payload=dict(spec=dict(
+                        id=spec_id, projectId=run.project_id, kind='image', purpose='draft',
+                    ))),
+                    dict(type='canvas.show', payload=dict(item=dict(
+                        id=item_id, projectId=run.project_id, kind='image',
+                        title='AI Director · 雨夜港口特写',
+                        position=dict(x=1220, y=140), width=320, height=220,
+                        binding=dict(role='empty', draftSpec=dict(id=spec_id)),
+                    ))),
+                ]),
+            ))
+            app.state.creation_projects.execute(cmd, session=run.session)
+            yield {'type': 'delta', 'text': (
+                '已按导演方案在画布上新增节点 **「AI Director · 雨夜港口特写」**。\n'
+                '你可以在下方审阅本轮改动，或随时一键撤销本轮全部画布变更。'
+            )}
+            await assistant_gate.wait()
+            return
+        yield {'type': 'delta', 'text': '已收到创作要求。'}
+        await assistant_gate.wait()
+        yield {'type': 'delta', 'text': '这是隔离测试回复。'}
+
+    agent.AgentRuntimes.stream = fixture_agent
+    agent.runtime_available = lambda runtime: runtime in {'default', 'codex'}
+tool_gate = asyncio.Event()
+tool_gate.set()
+tool_calls = []
+tool_outcome = 'succeeded'
+
+
+async def fixture_outpaint(context):
+    outcome = tool_outcome
+    tool_calls.append(len(tool_calls) + 1)
+    await context.progress('Fixture tool waiting')
+    await tool_gate.wait()
+    if outcome == 'failed':
+        raise ProjectError('Fixture tool failed')
+    outputs = []
+    for color in (['purple', 'orange'] if outcome == 'multiple' else ['purple']):
+        out = BytesIO()
+        Image.new('RGB', (96, 64), color).save(out, 'PNG')
+        outputs.append(Output('image', out.getvalue(), 'png', 'Fixture tool result ' + color))
+    return outputs
+
+
+# Only this isolated executable substitutes a recipe; no model endpoint is used.
+TOOLS['outpaint'] = replace(TOOLS['outpaint'], requires=lambda _: (), recipe=fixture_outpaint)
+app = create_app(store, generation_provider=None if args.http_generation_fixture else provider)
+
+
+@app.get('/api/creation-test-health')
+def health():
+    return dict(isolated=True, provider='fixture', root=str(root),
+                calls=http_generation_calls if args.http_generation_fixture else provider.calls, toolCalls=tool_calls,
+                selectionCalls=selection_calls, selectionActive=selection_active, imageEditCalls=image_edit_calls,
+                assistantFixture=args.assistant_fixture, assistantContexts=assistant_contexts,
+                httpGenerationFixture=args.http_generation_fixture)
+
+
+@app.post('/api/creation-test-assistant-gate')
+async def gate_assistant(request: Request):
+    if (await request.json()).get('open') is True:
+        assistant_gate.set()
+    else:
+        assistant_gate.clear()
+    return dict(open=assistant_gate.is_set())
+
+
+@app.post('/api/creation-test-legacy-projects')
+async def legacy_fixture(request: Request):
+    import json
+    from opendirector.domain.projects import identifier, project_name
+    value = await request.json()
+    project_id, name = identifier(value['id']), project_name(value['name'])
+    directory = root / 'projects' / name
+    directory.mkdir(parents=True, exist_ok=False)
+    (directory / 'project.json').write_text(json.dumps(dict(formatVersion=1, id=project_id, name=name)))
+    (directory / 'conversation.json').write_text('{"version":1,"messages":[],"draft":"preserve"}')
+    return dict(id=project_id, name=name, path=str(directory))
+
+
+@app.post('/api/creation-test-gate')
+async def gate(request: Request):
+    value = await request.json()
+    if value.get('open') is True:
+        provider.gate.set()
+    else:
+        provider.gate.clear()
+    return dict(open=provider.gate.is_set())
+
+
+@app.post('/api/creation-test-selection-gate')
+async def gate_selection(request: Request):
+    if (await request.json()).get('open') is True:
+        selection_gate.set()
+    else:
+        selection_gate.clear()
+    return dict(open=selection_gate.is_set())
+
+
+@app.post('/api/creation-test-tool-gate')
+async def gate_tool(request: Request):
+    global tool_outcome
+    value = await request.json()
+    if value.get('outcome') in {'succeeded', 'failed', 'multiple'}:
+        tool_outcome = value['outcome']
+    if value.get('open') is True:
+        tool_gate.set()
+    else:
+        tool_gate.clear()
+    return dict(open=tool_gate.is_set())
+
+
+print('Isolated browser fixture root:', root, flush=True)
+uvicorn.run(app, host='127.0.0.1', port=args.port)

@@ -11,20 +11,53 @@ from pathlib import Path
 from ..domain.projects import ProjectError
 
 
-def _find_binary(name: str) -> str | None:
+def _subprocess_kwargs() -> dict:
+    if os.name == 'nt':
+        return {'creationflags': getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)}
+    return {}
+
+
+def find_media_binary(name: str) -> str | None:
+    """Locate ffmpeg/ffprobe across env vars, PATH, ~/bin, .toolchain, and imageio-ffmpeg."""
+    env_key = f'OPENDIRECTOR_{name.upper()}_PATH'
+    env_val = os.environ.get(env_key, '').strip()
+    if env_val and Path(env_val).is_file():
+        return env_val
+
     found = shutil.which(name)
     if found:
         return found
-    home_bin = Path.home() / 'bin' / name
-    if home_bin.exists() and os.access(home_bin, os.X_OK):
-        return str(home_bin)
+
+    suffixes = ('.exe', '') if os.name == 'nt' else ('',)
+    candidates: list[Path] = []
+    for suffix in suffixes:
+        candidates.append(Path.home() / 'bin' / f'{name}{suffix}')
+        candidates.append(Path.cwd() / '.toolchain' / 'ffmpeg' / 'bin' / f'{name}{suffix}')
+        candidates.append(Path.cwd() / '.toolchain' / 'bin' / f'{name}{suffix}')
+
+    for candidate in candidates:
+        if candidate.is_file() and (os.name == 'nt' or os.access(candidate, os.X_OK)):
+            return str(candidate)
+
+    if name == 'ffmpeg':
+        try:
+            import imageio_ffmpeg  # type: ignore[import-not-found]
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+            if exe and Path(exe).is_file():
+                return exe
+        except Exception:
+            pass
     return None
 
 
+def _find_binary(name: str) -> str | None:
+    return find_media_binary(name)
+
+
 def _require_ffmpeg() -> str:
-    ffmpeg = _find_binary('ffmpeg')
+    ffmpeg = find_media_binary('ffmpeg')
     if not ffmpeg:
-        raise ProjectError('本机未检测到 FFmpeg 媒体引擎，请先在桌面健康中心检查环境。', 503, code='ffmpeg_missing')
+        raise ProjectError('本机未检测到 FFmpeg 媒体引擎，请先安装 FFmpeg（或运行 pip install imageio-ffmpeg）后重试。', 503, code='ffmpeg_missing')
     return ffmpeg
 
 
@@ -107,6 +140,7 @@ def probe_local_media(file_path: Path) -> dict:
             capture_output=True,
             text=True,
             timeout=20,
+            **_subprocess_kwargs(),
         )
         if proc.returncode == 0 and proc.stdout.strip():
             payload = json.loads(proc.stdout)
@@ -143,7 +177,7 @@ def probe_local_media(file_path: Path) -> dict:
             }
 
     ffmpeg = _require_ffmpeg()
-    proc = subprocess.run([ffmpeg, '-hide_banner', '-i', str(file_path)], capture_output=True, text=True, timeout=20)
+    proc = subprocess.run([ffmpeg, '-hide_banner', '-i', str(file_path)], capture_output=True, text=True, timeout=20, **_subprocess_kwargs())
     return _parse_ffmpeg_stderr_probe(proc.stderr or '', file_path)
 
 
@@ -297,7 +331,7 @@ def run_local_video_transform(file_path: Path, out_path: Path, *, op: str) -> di
         cmd.append('-an')
     cmd.append(str(out_path))
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **_subprocess_kwargs())
     if proc.returncode != 0 or not out_path.exists():
         raise ProjectError(f'本机 FFmpeg 处理失败：{proc.stderr.strip() or proc.returncode}', 500, code='ffmpeg_failed')
     return probe_local_media(out_path)

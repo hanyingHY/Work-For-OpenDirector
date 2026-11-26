@@ -1,0 +1,399 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { PROVIDER_PRESETS, matchingConnections, providerOptions, providerPresetFor } from "../src/canvas/providerPresets.ts";
+import type { ModelConfig } from "../src/backend/rules.ts";
+import { modelDescription } from "../src/canvas/modelDescriptions.ts";
+import { getActiveLocale, setActiveLocale } from "../src/i18n/messages.ts";
+
+test("BigModel video uses its native endpoint and preserves its identity in both locales", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "bigmodel-video")!;
+  assert.ok(preset);
+  assert.deepEqual(preset.kinds, ["video"]);
+  assert.deepEqual(preset.modelsByKind, { video: ["cogvideox-3"] });
+  assert.equal(preset.protocol, "bigmodel_video");
+  assert.equal(preset.url, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(preset.authMode, "bearer");
+  const previous = getActiveLocale();
+  try {
+    for (const [locale, name] of [["zh-CN", "智谱 BigModel 视频"], ["en-US", "Zhipu BigModel video"]] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("video").find((item) => item.id === preset.id)?.name, name);
+      assert.ok(!providerOptions("image").some((item) => item.id === preset.id));
+      const model: ModelConfig = { ...preset, id: "saved-video", kind: "video", modelId: "cogvideox-3", url: `${preset.url}/`,
+        inputRules: { profile: "bigmodel-cogvideox-3", allowedKinds: ["text", "image"], maxImages: 2,
+          maxVideos: 0, maxAudios: 0, videoModes: ["first_frame"] } };
+      assert.equal(providerPresetFor(model), preset.id);
+      assert.equal(providerPresetFor({ ...model, kind: "image" }), "custom");
+    }
+  } finally { setActiveLocale(previous); }
+});
+
+test("OpenAI compatible remains first in the image provider dropdown", () => {
+  assert.equal(providerOptions("image")[0]?.id, "custom");
+});
+
+test("BigModel offers GLM-Image with a localized label and a persistent provider identity", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "bigmodel")!;
+  assert.equal(preset.url, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(preset.protocol, "openai");
+  assert.equal(preset.authMode, "bearer");
+  assert.deepEqual(preset.modelsByKind, { image: ["glm-image"] });
+  const previous = getActiveLocale();
+  try {
+    for (const [locale, name] of [["zh-CN", "智谱 BigModel"], ["en-US", "Zhipu BigModel"]] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("image").find((item) => item.id === "bigmodel")?.name, name);
+      assert.ok(!providerOptions("agent").some((item) => item.id === "bigmodel"));
+    }
+  } finally {
+    setActiveLocale(previous);
+  }
+  const model: ModelConfig = { ...preset, id: "saved-bigmodel", kind: "image", modelId: "glm-image",
+    url: `${preset.url}/`, inputRules: { profile: "bigmodel-glm-image", allowedKinds: ["text"],
+      maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] } };
+  assert.equal(providerPresetFor(model), "bigmodel");
+  assert.equal(providerPresetFor({ ...model, url: "https://other.test/v1" }), "custom");
+});
+
+test("provider presets separate official protocol from self-hosted model names", () => {
+  const official = PROVIDER_PRESETS.find((item) => item.id === "minimax-video")!;
+  assert.equal(official.url, "https://api.minimax.cn/v2");
+  assert.equal(official.protocol, "minimax_video_v2");
+  assert.equal(official.authMode, "bearer");
+  assert.deepEqual(official.modelsByKind?.video, ["MiniMax-H3", "MiniMax-H3-Highspeed", "MiniMax-H3-Lite", "MiniMax-H3-Max"]);
+  const model: ModelConfig = { ...official, id: "one", kind: "video", modelId: "MiniMax-H3", inputRules: { profile: "", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] } };
+  assert.equal(providerPresetFor(model), "minimax-video");
+  assert.equal(providerPresetFor({ ...model, connectionType: "self_hosted", protocol: "vllm_omni" }), "vllm-omni-video");
+  assert.deepEqual(matchingConnections([{ ...model, providerId: "shared" }, { ...model, id: "two", providerId: "shared" }, { ...model, id: "three", providerId: "other" }], "video", { ...model, protocol: "minimax_video_v2", authMode: "bearer", apiKey: "" }).map((item) => item.id), ["one", "three"]);
+});
+
+test("Beijing Model Studio offers Qwen chat in both languages", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "bailian-beijing");
+  assert.ok(preset);
+  assert.deepEqual(preset.kinds, ["agent"]);
+  assert.deepEqual(preset.modelsByKind, { agent: ["qwen3.8-max"] });
+  assert.equal(preset.url, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+  assert.equal(preset.connectionType, "api");
+  assert.equal(preset.protocol, "openai");
+  assert.equal(preset.authMode, "bearer");
+  const previous = getActiveLocale();
+  try {
+    for (const [locale, label] of [["zh-CN", "阿里云百炼（北京）"], ["en-US", "Alibaba Cloud Model Studio (Beijing)"]] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("agent").find((item) => item.id === preset.id)?.name, label);
+    }
+  } finally {
+    setActiveLocale(previous);
+  }
+});
+
+test("saved Beijing workspace connections retain their preset", () => {
+  const model: ModelConfig = {
+    id: "saved-qwen", kind: "agent", modelId: "qwen3.8-max", connectionType: "api",
+    protocol: "openai", authMode: "bearer", url: "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+    inputRules: { profile: "agent", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] },
+  };
+  assert.equal(providerPresetFor(model), "bailian-beijing");
+  const workspace = "https://ws-example.cn-beijing.maas.aliyuncs.com/compatible-mode/v1";
+  assert.equal(providerPresetFor({ ...model, url: workspace + "/" }), "bailian-beijing");
+  for (const url of [
+    workspace.replace("cn-beijing", "ap-southeast-1"),
+    workspace.replace("aliyuncs.com", "aliyuncs.com.example.org"),
+    workspace.replace("/compatible-mode/v1", "/v1"),
+    "https://proxy.example.org/v1",
+  ]) {
+    assert.equal(providerPresetFor({ ...model, url }), "custom");
+  }
+  assert.equal(providerPresetFor({ ...model, kind: "image", url: workspace }), "custom");
+});
+
+test("both Kimi billing routes are offered as separate chat presets", () => {
+  // Token billing and the Kimi Code subscription use different base URLs and
+  // different keys, so one row cannot serve both.
+  const rows = [
+    ["kimi", "https://api.moonshot.cn/v1", "月之暗面 Kimi 开放平台", "Moonshot Kimi Open Platform"],
+    ["kimi-coding", "https://api.kimi.com/coding/v1", "月之暗面 Kimi Code 订阅", "Moonshot Kimi Code subscription"],
+  ] as const;
+  for (const [id, url, zh, en] of rows) {
+    const preset = PROVIDER_PRESETS.find((item) => item.id === id);
+    assert.ok(preset, id);
+    assert.deepEqual(preset.kinds, ["agent"]);
+    assert.equal(preset.url, url);
+    assert.equal(preset.connectionType, "api");
+    assert.equal(preset.protocol, "openai");
+    assert.equal(preset.authMode, "bearer");
+    assert.equal(preset.logoOrganization, "moonshotai");
+    // Omitting modelsByKind keeps live /models discovery, so the picker lists the
+    // models the entered key can actually reach instead of a hardcoded snapshot.
+    assert.equal(preset.modelsByKind, undefined);
+    const previous = getActiveLocale();
+    try {
+      for (const [locale, label] of [["zh-CN", zh], ["en-US", en]] as const) {
+        setActiveLocale(locale);
+        assert.equal(providerOptions("agent").find((item) => item.id === id)?.name, label);
+      }
+    } finally {
+      setActiveLocale(previous);
+    }
+    for (const kind of ["image", "video", "audio"] as const)
+      assert.equal(providerOptions(kind).some((item) => item.id === id), false);
+  }
+  // Distinct names keep the two routes distinguishable in the picker.
+  assert.notEqual(
+    PROVIDER_PRESETS.find((item) => item.id === "kimi")?.name,
+    PROVIDER_PRESETS.find((item) => item.id === "kimi-coding")?.name,
+  );
+});
+
+test("saved Moonshot connections retain their preset on the mainland endpoint only", () => {
+  const model: ModelConfig = {
+    id: "saved-kimi", kind: "agent", modelId: "kimi-k3", connectionType: "api",
+    protocol: "openai", authMode: "bearer", url: "https://api.moonshot.cn/v1",
+    inputRules: { profile: "agent", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] },
+  };
+  assert.equal(providerPresetFor(model), "kimi");
+  assert.equal(providerPresetFor({ ...model, url: "https://api.moonshot.cn/v1/" }), "kimi");
+  // A saved Kimi Code connection must not fall back to the open-platform row.
+  assert.equal(providerPresetFor({ ...model, url: "https://api.kimi.com/coding/v1" }), "kimi-coding");
+  assert.equal(providerPresetFor({ ...model, url: "https://api.kimi.com/coding/v1/" }), "kimi-coding");
+  for (const url of [
+    // Kimi Code is matched on its own base URL only.
+    "https://api.kimi.com/v1",
+    "https://api.kimi.com/coding/v1/chat/completions",
+    // The international endpoint is a separately tracked row in #240.
+    "https://api.moonshot.ai/v1",
+    "https://api.moonshot.cn/v1/chat/completions",
+    "https://proxy.example.org/v1",
+  ]) {
+    assert.equal(providerPresetFor({ ...model, url }), "custom");
+  }
+  assert.equal(providerPresetFor({ ...model, kind: "image", url: "https://api.moonshot.cn/v1" }), "custom");
+});
+
+test("MOSS presets offer the supported image and speech models by kind", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "moss");
+  assert.ok(preset);
+  assert.equal(preset.url, "https://api.mosi.cn/v1");
+  assert.equal(preset.protocol, "openai");
+  assert.equal(preset.connectionType, "api");
+  assert.equal(preset.authMode, "bearer");
+  assert.equal(preset.logoOrganization, "OpenMOSS-Team");
+  assert.deepEqual(preset.kinds, ["image", "audio"]);
+  assert.deepEqual(preset.modelsByKind, {
+    image: ["moss-image-sft-1.0", "moss-image-base-1.0"],
+    audio: ["moss-tts-1.5-flash", "moss-tts-1.0-pro", "moss-tts-1.5-flash-2026-06-26", "moss-tts-1.0-pro-2026-02-07"],
+  });
+  assert.ok(providerOptions("image").some((item) => item.id === "moss"));
+  assert.ok(providerOptions("audio").some((item) => item.id === "moss"));
+  for (const kind of ["agent", "video", "vision"] as const)
+    assert.ok(!providerOptions(kind).some((item) => item.id === "moss"));
+});
+
+test("Kling is an optional official video service with a stable connection region", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "kling-video");
+  assert.ok(preset);
+  assert.deepEqual(preset.kinds, ["video"]);
+  assert.deepEqual(preset.modelsByKind, { video: ["kling-4.0", "kling-4.0-flash"] });
+  assert.equal(preset.protocol, "kling_video");
+  assert.equal(preset.url, "https://api-beijing.klingai.com");
+  assert.equal(preset.authMode, "bearer");
+  const previous = getActiveLocale();
+  try {
+    for (const [locale, label] of [["zh-CN", "可灵官方视频"], ["en-US", "Kling official video"]] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("video").find((item) => item.id === preset.id)?.name, label);
+      assert.equal(preset.url, "https://api-beijing.klingai.com");
+    }
+    const model: ModelConfig = { ...preset, id: "kling", kind: "video", modelId: "kling-4.0",
+      inputRules: { profile: "kling-official", allowedKinds: ["text", "image"], maxImages: 10, maxVideos: 0, maxAudios: 0, videoModes: ["first_frame", "reference"] } };
+    assert.equal(providerPresetFor({ ...model, url: "https://api-singapore.klingai.com" }), preset.id);
+  } finally { setActiveLocale(previous); }
+});
+
+test("MOSS provider labels follow the display language", () => {
+  const previous = getActiveLocale();
+  try {
+    setActiveLocale("zh-CN");
+    assert.equal(providerOptions("image").find((item) => item.id === "moss")?.name, "MOSS 开放平台");
+    assert.equal(providerOptions("audio").find((item) => item.id === "moss")?.name, "MOSS 开放平台");
+    setActiveLocale("en-US");
+    assert.equal(providerOptions("image").find((item) => item.id === "moss")?.name, "MOSS Open Platform");
+    assert.equal(providerOptions("audio").find((item) => item.id === "moss")?.name, "MOSS Open Platform");
+  } finally {
+    setActiveLocale(previous);
+  }
+});
+
+test("Zhipu BigModel preset offers chat and GLM-TTS models by kind", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "zhipu");
+  assert.ok(preset);
+  assert.equal(preset.url, "https://open.bigmodel.cn/api/paas/v4");
+  assert.equal(preset.protocol, "openai");
+  assert.equal(preset.connectionType, "api");
+  assert.equal(preset.authMode, "bearer");
+  assert.equal(preset.logoOrganization, "zai-org");
+  // One connection serves both categories; the category picks the model list.
+  assert.deepEqual(preset.kinds, ["agent", "audio"]);
+  assert.deepEqual(preset.modelsByKind, {
+    agent: ["glm-5.3", "glm-5.3-flash", "glm-5.2"],
+    audio: ["glm-tts"],
+  });
+  assert.ok(providerOptions("agent").some((item) => item.id === "zhipu"));
+  assert.ok(providerOptions("audio").some((item) => item.id === "zhipu"));
+  for (const kind of ["image", "video", "vision"] as const)
+    assert.ok(!providerOptions(kind).some((item) => item.id === "zhipu"));
+});
+
+test("Zhipu provider labels follow the display language", () => {
+  const previous = getActiveLocale();
+  try {
+    setActiveLocale("zh-CN");
+    for (const kind of ["agent", "audio"] as const)
+      assert.equal(providerOptions(kind).find((item) => item.id === "zhipu")?.name, "智谱 BigModel");
+    setActiveLocale("en-US");
+    for (const kind of ["agent", "audio"] as const)
+      assert.equal(providerOptions(kind).find((item) => item.id === "zhipu")?.name, "Zhipu BigModel");
+  } finally {
+    setActiveLocale(previous);
+  }
+});
+
+test("a saved Zhipu agent connection reopens with its provider identity", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "zhipu")!;
+  for (const modelId of preset.modelsByKind?.agent ?? []) {
+    const model: ModelConfig = {
+      ...preset, id: "saved-zhipu", kind: "agent", modelId,
+      url: `${preset.url}/`,
+      inputRules: { profile: "agent", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] },
+    };
+    assert.equal(providerPresetFor(model), "zhipu");
+    assert.equal(providerPresetFor({ ...model, url: "https://other.test/v1" }), "custom");
+  }
+});
+
+test("Atlas Cloud preset offers agent chat through the OpenAI-compatible gateway", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "atlascloud");
+  assert.ok(preset);
+  assert.equal(preset.name, "Atlas Cloud");
+  assert.equal(preset.url, "https://api.atlascloud.ai/v1");
+  assert.equal(preset.protocol, "openai");
+  assert.equal(preset.connectionType, "api");
+  assert.equal(preset.authMode, "bearer");
+  assert.deepEqual(preset.kinds, ["agent"]);
+  assert.equal(preset.modelsByKind, undefined);
+  assert.ok(providerOptions("agent").some((item) => item.id === "atlascloud"));
+  for (const kind of ["image", "video", "audio", "vision"] as const)
+    assert.ok(!providerOptions(kind).some((item) => item.id === "atlascloud"));
+});
+
+test("Atlas Cloud provider label is the same in both display languages", () => {
+  const previous = getActiveLocale();
+  try {
+    for (const locale of ["zh-CN", "en-US"] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("agent").find((item) => item.id === "atlascloud")?.name, "Atlas Cloud");
+    }
+  } finally {
+    setActiveLocale(previous);
+  }
+});
+
+test("a saved Atlas Cloud agent connection reopens with its provider identity", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "atlascloud")!;
+  const model: ModelConfig = {
+    ...preset, id: "saved-atlascloud", kind: "agent", modelId: "deepseek-ai/deepseek-v4-flash",
+    url: `${preset.url}/`,
+    inputRules: { profile: "agent", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] },
+  };
+  assert.equal(providerPresetFor(model), "atlascloud");
+  assert.equal(providerPresetFor({ ...model, url: "https://other.test/v1" }), "custom");
+});
+
+test("a saved MOSS image connection reopens with its provider identity", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "moss");
+  assert.ok(preset);
+  for (const modelId of ["moss-image-sft-1.0", "moss-image-base-1.0"]) {
+    const model: ModelConfig = {
+      ...preset, id: "saved-moss", kind: "image", modelId,
+      url: `${preset.url}/`,
+      inputRules: { profile: "moss-image", allowedKinds: ["text"], maxImages: 0,
+        maxVideos: 0, maxAudios: 0, videoModes: [], maxPromptCharacters: 4000 },
+    };
+    assert.equal(providerPresetFor(model), "moss");
+    assert.equal(providerPresetFor({ ...model, kind: "agent" }), "custom");
+    assert.equal(providerPresetFor({ ...model, url: "https://other.test/v1" }), "custom");
+  }
+});
+
+test("saved MOSS image and audio connections share one provider brand", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "moss");
+  assert.ok(preset);
+  for (const kind of ["image", "audio"] as const) {
+    for (const modelId of preset.modelsByKind?.[kind] ?? []) {
+      const model: ModelConfig = {
+        ...preset, id: `saved-moss-${kind}`, kind, modelId,
+        inputRules: { profile: kind === "audio" ? "moss-speech" : "moss-image", allowedKinds: [], maxImages: 0,
+          maxVideos: 0, maxAudios: 0, videoModes: [] },
+      };
+      assert.equal(providerPresetFor(model), "moss");
+      assert.equal(providerOptions(kind).find((item) => item.id === "moss")?.logoOrganization, "OpenMOSS-Team");
+    }
+  }
+});
+
+
+test("Kling Flash descriptions distinguish first-frame capabilities in both languages", () => {
+  const previous = getActiveLocale();
+  try {
+    const model = { protocol: "kling_video", modelId: "kling-4.0-flash" };
+    setActiveLocale("en-US");
+    assert.match(modelDescription(model)!, /720P.*first-frame.*3–20/);
+    assert.doesNotMatch(modelDescription(model)!, /last/);
+    setActiveLocale("zh-CN");
+    assert.match(modelDescription(model)!, /720P.*首帧.*3–20/);
+    assert.doesNotMatch(modelDescription(model)!, /尾帧/);
+  } finally { setActiveLocale(previous); }
+});
+
+test("MiniMax H3 image preset exposes both models in both display languages", () => {
+  const previous = getActiveLocale();
+  try {
+    const preset = PROVIDER_PRESETS.find((item) => item.id === "minimax-image")!;
+    assert.equal(preset.url, "https://api.minimax.cn/v1");
+    assert.deepEqual(preset.modelsByKind?.image, ["MiniMax-H3-Image", "MiniMax-H3-Image-Highspeed"]);
+    for (const [locale, name] of [
+      ["zh-CN", "MiniMax 官方图片"], ["en-US", "MiniMax Official Images"],
+    ] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("image").find((item) => item.id === preset.id)?.name, name);
+    }
+  } finally {
+    setActiveLocale(previous);
+  }
+});
+
+test("MiniMax speech preset and saved identity follow the display language", () => {
+  const previous = getActiveLocale();
+  try {
+    const preset = PROVIDER_PRESETS.find(item => item.id === "minimax-speech")!;
+    assert.equal(preset.url, "https://api.minimax.cn/v1");
+    assert.deepEqual(preset.kinds, ["audio"]);
+    assert.deepEqual(preset.modelsByKind?.audio, ["speech-2.8-hd", "speech-2.8-turbo"]);
+    for (const [locale, name] of [["zh-CN", "MiniMax 官方语音"], ["en-US", "MiniMax Official Speech"]] as const) {
+      setActiveLocale(locale);
+      assert.equal(providerOptions("audio").find(item => item.id === preset.id)?.name, name);
+      const model: ModelConfig = { ...preset, id: "saved-minimax", kind: "audio", modelId: "speech-2.8-hd",
+        inputRules: { profile: "minimax-speech", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] } };
+      assert.equal(providerPresetFor(model), preset.id);
+      assert.equal(providerPresetFor({ ...model, url: "https://api.minimax.io/v1" }), "custom");
+    }
+  } finally { setActiveLocale(previous); }
+});
+
+test("a saved Zhipu GLM-TTS connection reopens with its provider identity", () => {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === "zhipu")!;
+  const model: ModelConfig = { ...preset, id: "saved", kind: "audio", modelId: "glm-tts", url: `${preset.url}/`,
+    inputRules: { profile: "zhipu-speech", allowedKinds: [], maxImages: 0, maxVideos: 0, maxAudios: 0, videoModes: [] } };
+  assert.equal(providerPresetFor(model), "zhipu");
+  assert.equal(providerPresetFor({ ...model, url: "https://other.test/v1" }), "custom");
+});

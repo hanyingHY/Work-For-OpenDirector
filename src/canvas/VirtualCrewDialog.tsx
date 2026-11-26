@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider.tsx";
 import type { MessageKey } from "../i18n/types.ts";
 import type { CanvasFragment } from "./operations.ts";
@@ -33,6 +33,15 @@ export function VirtualCrewDialog({
   const [aspectRatio, setAspectRatio] = useState<CrewAspectRatio>("16:9");
   const [plan, setPlan] = useState<VirtualCrewPlan | null>(null);
   const [activeTab, setActiveTab] = useState<"writers" | "casting" | "shots">("writers");
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
   if (!open) return null;
 

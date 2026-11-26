@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider.tsx";
 import type { CanvasNode } from "./model.ts";
 import type { CanvasFragment } from "./operations.ts";
@@ -28,6 +28,15 @@ export function MediaCompareDialog({
   const [leftId, setLeftId] = useState(mediaNodes[0]?.id ?? "");
   const [rightId, setRightId] = useState(mediaNodes[1]?.id ?? mediaNodes[0]?.id ?? "");
   const [splitPct, setSplitPct] = useState(50);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
   if (!open) return null;
 

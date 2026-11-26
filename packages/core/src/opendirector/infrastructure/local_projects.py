@@ -1,0 +1,219 @@
+"""Local catalog lock and edit leases; project facts live in creation commits."""
+
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import tempfile
+import time
+
+from filelock import FileLock
+from opendirector.domain.projects import ProjectError, identifier
+
+def child(directory: Path, name: str) -> Path:
+    path = directory / name
+    if path.is_symlink():
+        raise ProjectError("项目内部文件不能是符号链接。", 409)
+    return path
+
+
+def read_json(path: Path):
+    path = Path(_json_path(path))
+    if path.is_symlink():
+        raise ProjectError("不能读取符号链接项目文件。", 409)
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _json_path(path: str | Path) -> str:
+    # Win32 metadata APIs still apply MAX_PATH on some native installations.
+    # This is lexical spelling only; never resolve a link to a different object.
+    value = os.path.abspath(path)
+    if sys.platform != 'win32' or value.startswith('\\\\?\\'):
+        return value
+    return '\\\\?\\UNC\\' + value[2:] if value.startswith('\\\\') else '\\\\?\\' + value
+
+
+def _replace_json(temporary: str, path: Path) -> None:
+    # Windows readers/scanners can briefly deny an atomic replacement. Retry
+    # only these native errors, using the same already-flushed temporary file.
+    # Never unlink the destination or fall back to an in-place write. Persistent
+    # permission errors still propagate, and every attempt rechecks the link rule.
+    deadline = time.monotonic() + 0.5
+    while True:
+        if Path(_json_path(path)).is_symlink():
+            raise ProjectError("不能覆盖符号链接项目文件。", 409)
+        try:
+            os.replace(_json_path(temporary), _json_path(path))
+            return
+        except OSError as error:
+            remaining = deadline - time.monotonic()
+            if os.name != 'nt' or getattr(error, 'winerror', None) not in {5, 32, 33} or remaining <= 0:
+                raise
+            time.sleep(min(0.01, remaining))
+
+
+def write_json(path: Path, value) -> None:
+    if Path(_json_path(path)).is_symlink():
+        raise ProjectError("不能覆盖符号链接项目文件。", 409)
+    fd, temporary = tempfile.mkstemp(prefix=".opendirector-", suffix=".tmp", dir=_json_path(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _replace_json(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+class LocalProjects:
+    """Coordination only; never reads, migrates or repairs old project data."""
+    LEASE_SECONDS = 60
+    # A run blocks project moves and deletion like a browser lease. Its
+    # separate key lets browsers open or release their own editing session.
+    _AGENT_SESSION_PREFIX = "agent:"
+
+    HANDOFF_SECONDS = 120
+
+    def __init__(self, repository: Path):
+        self.repository = repository.resolve()
+        self.root = self.repository / "projects"
+        self.state_dir = self.repository / ".opendirector"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.lock = FileLock(self.state_dir / "catalog.lock", timeout=15)
+        self.database = self.state_dir / "catalog.sqlite3"
+        with self.transaction() as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY, project_id TEXT NOT NULL, expires REAL NOT NULL,
+                    path TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS edit_handoffs (
+                    project_id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+                    requester TEXT NOT NULL, expires REAL NOT NULL
+                );
+            """)
+            db.execute("DELETE FROM sessions WHERE expires<=?", (time.time(),))
+
+
+    @contextmanager
+    def transaction(self):
+        with self.lock:
+            db = sqlite3.connect(self.database, timeout=15)
+            db.row_factory = sqlite3.Row
+            try:
+                yield db
+                db.commit()
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+
+    def _check_root(self):
+        if self.root.is_symlink() or self.root.resolve() != self.root:
+            raise ProjectError("projects 不能是符号链接，请使用仓库内的项目文件夹。", 409)
+        if self.root.exists() and not self.root.is_dir():
+            raise ProjectError("仓库下的 projects 不是文件夹，请检查后重试。", 409)
+
+
+    @staticmethod
+    def _conflict(parent: Path, name: str, source: Path | None = None):
+        for entry in parent.iterdir():
+            if entry.name.casefold() == name.casefold() and entry != source:
+                raise ProjectError("该位置已有同名文件或文件夹，请使用其他名称。", 409)
+
+
+    def acquire_edit_lease(self, db: sqlite3.Connection, project: dict[str, str], session: str) -> None:
+        identifier(session)
+        project_id = project["id"]
+        self.clear_other_edit_requests(db, project_id, session)
+        if db.execute("SELECT 1 FROM sessions WHERE project_id=? AND id<>? AND id NOT LIKE ? AND expires>?",
+                      (project_id, session, self._AGENT_SESSION_PREFIX + "%", time.time())).fetchone():
+            raise ProjectError("该项目正在其他窗口中打开，请先关闭后再试。", 409, code="project_open_elsewhere")
+        lease = db.execute("SELECT path FROM sessions WHERE id=? AND project_id=? AND expires>?", (session, project_id, time.time())).fetchone()
+        if lease and lease["path"] != project["path"]:
+            raise ProjectError("项目目录已在应用外改名或移动，请复制未保存内容并刷新页面。", 409)
+        db.execute("INSERT INTO sessions(id,project_id,expires,path) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,expires=excluded.expires,path=excluded.path", (session, project_id, time.time() + self.LEASE_SECONDS, project["path"]))
+
+
+    def clear_other_edit_requests(self, db, project_id, session):
+        db.execute(
+            "DELETE FROM edit_handoffs WHERE project_id!=? AND (owner=? OR requester=?)",
+            (project_id, session, session),
+        )
+
+    def editor(self, db, project_id, *, now=None):
+        return db.execute(
+            "SELECT id FROM sessions WHERE project_id=? AND id NOT LIKE ? AND expires>?",
+            (project_id, self._AGENT_SESSION_PREFIX + "%", time.time() if now is None else now),
+        ).fetchone()
+
+    def editing_state(self, db, project_id, session, *, now=None):
+        now = time.time() if now is None else now
+        editor = self.editor(db, project_id, now=now)
+        if editor is None:
+            return {'mode': 'preview', 'handoff': 'available'}
+        owner = editor['id']
+        pending = db.execute(
+            "SELECT requester FROM edit_handoffs WHERE project_id=? AND owner=? AND expires>?",
+            (project_id, owner, now),
+        ).fetchone()
+        if owner == session:
+            return {'mode': 'edit', 'requester': pending['requester'] if pending else None}
+        return {'mode': 'preview', 'handoff': (
+            'requested' if pending and pending['requester'] == session
+            else 'busy' if pending else 'occupied'
+        )}
+
+    def request_edit(self, db, project, session):
+        project_id = project['id']
+        now = time.time()
+        state = self.editing_state(db, project_id, session, now=now)
+        if state == {'mode': 'preview', 'handoff': 'available'}:
+            self.acquire_edit_lease(db, project, session)
+        elif state == {'mode': 'preview', 'handoff': 'occupied'}:
+            db.execute("""
+                INSERT INTO edit_handoffs(project_id,owner,requester,expires) VALUES (?,?,?,?)
+                ON CONFLICT(project_id) DO UPDATE SET owner=excluded.owner,
+                    requester=excluded.requester, expires=excluded.expires
+            """, (project_id, self.editor(db, project_id, now=now)['id'], session, now + self.HANDOFF_SECONDS))
+        return self.editing_state(db, project_id, session)
+
+    def resolve_edit(self, db, project, session, requester, accept):
+        project_id = project['id']
+        if self.editing_state(db, project_id, session) == {'mode': 'edit', 'requester': requester}:
+            db.execute("DELETE FROM edit_handoffs WHERE project_id=?", (project_id,))
+            if accept:
+                db.execute("DELETE FROM sessions WHERE id=?", (session,))
+                self.acquire_edit_lease(db, project, requester)
+        return self.editing_state(db, project_id, session)
+
+    def agent_session_key(self, session: str) -> str:
+        return self._AGENT_SESSION_PREFIX + identifier(session)
+
+    def start_agent_session(self, db, project_id, path: Path, session: str):
+        """Called in the transaction that validates the browser lease and accepts the turn."""
+        now = time.time()
+        db.execute("DELETE FROM sessions WHERE expires<=? AND id LIKE ?",
+                   (now, self._AGENT_SESSION_PREFIX + "%"))
+        db.execute("INSERT INTO sessions(id,project_id,expires,path) VALUES (?,?,?,?)",
+                   (self.agent_session_key(session), str(project_id), now + self.LEASE_SECONDS, str(path)))
+
+    def renew_agent_session(self, session: str) -> bool:
+        with self.transaction() as db:
+            now = time.time()
+            return bool(db.execute("UPDATE sessions SET expires=? WHERE id=? AND expires>?",
+                                   (now + self.LEASE_SECONDS, self.agent_session_key(session), now)).rowcount)
+
+    def release_agent_session(self, session: str):
+        self.release(self.agent_session_key(session))
+
+    def release(self, session: str):
+        with self.transaction() as db:
+            db.execute("DELETE FROM edit_handoffs WHERE owner=? OR requester=?", (session, session))
+            db.execute("DELETE FROM sessions WHERE id=?", (session,))

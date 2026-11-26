@@ -1,0 +1,237 @@
+import { chooseGenerationModel } from "./model_picker.mjs";
+/** Official provider configuration and first/last frame edits; no remote generation. */
+import assert from "node:assert/strict";
+import { launchBrowser } from "./engine.mjs";
+const base = process.env.CREATION_WEB_URL ?? "http://127.0.0.1:5179";
+const api = process.env.CREATION_API_URL ?? "http://127.0.0.1:8019";
+const headers = {
+  "X-OpenDirector-Request": "1",
+  "Content-Type": "application/json",
+};
+async function call(path, body) {
+  const response = await fetch(api + path, {
+    headers,
+    ...(body ? { method: "POST", body: JSON.stringify(body) } : {}),
+  });
+  assert.ok(response.ok, await response.clone().text());
+  return response.json();
+}
+assert.equal((await call("/api/creation-test-health")).isolated, true);
+const browser = await launchBrowser();
+const page = await browser.newPage({ locale: "en-US", viewport: { width: 1600, height: 1100 } });
+// Skip the first-run model setup welcome; it covers the canvas.
+await page.addInitScript(() =>
+  localStorage.setItem("opendirector.modelSetup.v1", "dismissed"),
+);
+page.setDefaultTimeout(15000);
+try {
+  // One official connection with both models, as the provider settings save
+  // them; the picker step below switches between the two.
+  const saved = await call("/api/model-configs/batch", {
+    kind: "video",
+    url: "https://fixture.invalid/v2",
+    modelIds: ["MiniMax-H3", "MiniMax-H3-Lite"],
+    apiKey: "fixture",
+    protocol: "minimax_video_v2",
+    connectionType: "api",
+    authMode: "bearer",
+  });
+  const model = saved.find((item) => item.modelId === "MiniMax-H3");
+  assert.deepEqual(model.inputRules.frameRoles, ["first_frame", "last_frame"]);
+  const projectId = crypto.randomUUID();
+  await call(`/api/creation/projects/${projectId}/commands`, {
+    commandId: crypto.randomUUID(),
+    projectId,
+    type: "project.create",
+    payload: { name: `Official H3 ${projectId}` },
+  });
+  await page.goto(`${base}/ai-tool/ai-canvas/${projectId}?creation=unified`);
+  await page.getByText("Saved on this device", { exact: true }).waitFor();
+  const png = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 256;
+    canvas.getContext("2d").fillRect(0, 0, 256, 256);
+    return canvas.toDataURL("image/png").split(",")[1];
+  });
+  // Hold the first save's background hydration until the next import has
+  // queued its local edit. No request, reducer or save result is replaced.
+  await page.evaluate(async (projectId) => {
+    const { workspaceProjection } = await import("/src/backend/workspace.ts");
+    const projection = workspaceProjection(projectId), read = projection.read;
+    const NativeImage = window.Image;
+    let release, heldSnapshot, held = 0, returned = 0, released = false, armed = false;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const restore = () => {
+      projection.read = read;
+      window.Image = NativeImage;
+      released = true;
+      release();
+    };
+    projection.read = async function(snapshot) {
+      const next = await read.call(this, snapshot);
+      if (!heldSnapshot && snapshot?.canvasItems.length === 1) heldSnapshot = snapshot;
+      if (!released && snapshot === heldSnapshot) {
+        held++;
+        await gate;
+        returned++;
+      }
+      return next;
+    };
+    window.Image = new Proxy(NativeImage, {
+      construct(target, args) {
+        const element = Reflect.construct(target, args);
+        // Register after the decoder's own onload handler. Its promise
+        // continuations queue the import before this native load listener runs.
+        queueMicrotask(() => element.addEventListener("load", () => {
+          if (!armed) return;
+          armed = false;
+          restore();
+        }, { once: true }));
+        return element;
+      },
+    });
+    window.__h3RefreshRace = {
+      held: () => held,
+      arm: () => { armed = true; },
+      restore,
+      report: () => ({ held, returned, released, restored: projection.read === read && window.Image === NativeImage }),
+    };
+  }, projectId);
+  for (const name of ["first.png", "last.png"]) {
+    if (name === "last.png") {
+      await page.waitForFunction(() => window.__h3RefreshRace.held() > 0);
+      await page.evaluate(() => window.__h3RefreshRace.arm());
+    }
+    await page
+      .getByLabel("Choose local asset files", { exact: true })
+      .setInputFiles({
+        name,
+        mimeType: "image/png",
+        buffer: Buffer.from(png, "base64"),
+      });
+    const count = name === "first.png" ? 1 : 2;
+    for (let attempt = 0; attempt < 150; attempt++) {
+      const current = await call(`/api/creation/projects/${projectId}`);
+      if (current.canvasItems.length === count) break;
+      if (attempt === 149) throw Error(`${name}: expected ${count} saved canvas items, received ${current.canvasItems.length}\n${await page.locator("body").innerText()}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  const refresh = await page.evaluate(() => window.__h3RefreshRace.report());
+  assert.ok(refresh.held > 0);
+  assert.equal(refresh.returned, refresh.held);
+  assert.equal(refresh.released, true);
+  assert.equal(refresh.restored, true);
+  const snapshot = await call(`/api/creation/projects/${projectId}`);
+  assert.equal(snapshot.canvasItems.length, 2);
+  const created = await page.evaluate(
+    async ({ projectId, modelId, sources }) => {
+      const { creationClient } = await import("/src/backend/creationClient.ts");
+      const client = creationClient(projectId);
+      await client.refresh();
+      const specId = crypto.randomUUID(),
+        itemId = crypto.randomUUID();
+      const receipt = await client.command("canvas.createGeneration", {
+        spec: {
+          id: specId,
+          projectId,
+          kind: "video",
+          purpose: "generation",
+          modelConfigId: modelId,
+          prompt: "Animate between these frames",
+          parameters: {
+            videoMode: "first_frame",
+            resolution: "2K",
+            durationSeconds: 5,
+          },
+        },
+        item: {
+          id: itemId,
+          projectId,
+          kind: "video",
+          position: { x: 400, y: 50 },
+          binding: { role: "generation", objectRef: { id: specId } },
+        },
+        references: sources.map((source, index) => ({
+          id: crypto.randomUUID(),
+          projectId,
+          targetSpecId: specId,
+          binding: "follow_current",
+          source: { id: source.id },
+          role: index ? "last_frame" : "first_frame",
+          order: index,
+        })),
+      });
+      if (receipt.status !== "applied") throw Error(JSON.stringify(receipt));
+      return { itemId, specId };
+    },
+    { projectId, modelId: model.id, sources: snapshot.canvasItems },
+  );
+  await page.reload();
+  const node = page.locator(`.react-flow__node[data-id="${created.itemId}"]`);
+  await node.waitFor();
+  await node.click();
+  const first = page.getByLabel("Choose First frame", { exact: true });
+  const last = page.getByLabel("Choose Last frame", { exact: true });
+  await last.waitFor();
+  await page.getByRole("combobox", { name: "Generation model", exact: true }).click();
+  const models = page.getByRole("listbox", { name: "Generation model", exact: true });
+  await models.getByRole("group", { name: "MiniMax official video", exact: true }).waitFor();
+  assert.equal(await models.getByText("Local service", { exact: true }).count(), 0);
+  await page.screenshot({ path: "/tmp/node-model-picker.png" });
+  await page.keyboard.press("Escape");
+  const lite = (await call("/api/model-configs")).find((item) => item.modelId === "MiniMax-H3-Lite");
+  assert.ok(lite);
+  await chooseGenerationModel(page, `config:${lite.id}`);
+  await page.waitForFunction(async ({ projectId, specId, modelId }) => {
+    const response = await fetch(`/api/creation/projects/${projectId}`, { headers: { "X-OpenDirector-Request": "1" } });
+    const snapshot = await response.json();
+    return snapshot.generationSpecs.find((spec) => spec.id === specId)?.modelConfigId === modelId;
+  }, { projectId, specId: created.specId, modelId: lite.id });
+  await chooseGenerationModel(page, `config:${model.id}`);
+
+  assert.equal(await last.isEnabled(), true);
+  assert.equal(await first.inputValue(), snapshot.canvasItems[0].id);
+  assert.equal(await last.inputValue(), snapshot.canvasItems[1].id);
+  await last.selectOption("");
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const current = await call(`/api/creation/projects/${projectId}`);
+    if (!current.references.some((ref) => ref.active && ref.targetSpecId === created.specId && ref.role === "last_frame")) break;
+    if (attempt === 149) throw Error("tail frame edit was not committed");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  await page.reload();
+  await page.locator(`.react-flow__node[data-id="${created.itemId}"]`).click();
+  assert.equal(
+    await page.getByLabel("Choose Last frame", { exact: true }).inputValue(),
+    "",
+  );
+  const final = await call(`/api/creation/projects/${projectId}`);
+  assert.equal(final.generationSpecs.find((spec) => spec.id === created.specId).modelConfigId, model.id);
+  assert.equal(final.references.find((ref) => ref.active && ref.targetSpecId === created.specId && ref.role === "first_frame").source.id, snapshot.canvasItems[0].id);
+  assert.ok(!final.references.some((ref) => ref.active && ref.targetSpecId === created.specId && ref.role === "last_frame"));
+  for (const source of snapshot.canvasItems) {
+    assert.ok(final.canvasItems.some((item) => item.id === source.id));
+    const assetId = source.binding.objectRef.assetId;
+    const response = await fetch(`${api}/api/creation/projects/${projectId}/assets/${assetId}/content`, { headers });
+    assert.ok(response.ok);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), Buffer.from(png, "base64"));
+  }
+  console.log(
+    JSON.stringify({
+      passed: true,
+      checks: [
+        "pending second import survives background hydration",
+        "official provider config",
+        "explicit frame roles",
+        "frame projection after reload",
+        "editable tail slot",
+        "tail clearing persists",
+        "saved source bytes and model survive reload",
+      ],
+    }),
+  );
+} finally {
+  await page.evaluate(() => window.__h3RefreshRace?.restore()).catch(() => {});
+  await browser.close();
+}

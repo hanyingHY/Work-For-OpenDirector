@@ -1,0 +1,237 @@
+.cw-composer {
+  --chat-border: #ffffff20;
+  --chat-surface: #303034;
+  --chat-text: #e9e9ed;
+  --chat-muted: #a3a4ae;
+  --input-min-height: 112px;
+  --prompt-line-height: 1.7;
+  --input-max-height: calc(10em * var(--prompt-line-height) + 4px);
+  --composer-reference-height: 50px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: inherit;
+  overflow: hidden;
+}
+
+.cw-composer.cw-generation-composer {
+  padding: 10px 12px 8px;
+}
+
+/* Advanced editing cards keep their own scrolling. A generator's prompt owns
+   vertical scrolling, while its references and footer stay in view. */
+.cw-composer-dock:has(> .cw-composer) {
+  overflow: visible;
+}
+
+/* Status line under the prompt: always secondary to the prompt itself, whether
+   it reports progress, a finished run or a failure. */
+.cw-composer-provider-note {
+  flex: 0 0 auto;
+  margin: 6px 0;
+  color: var(--chat-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* The running label breathes between the muted and normal text colour. A
+   1.6 s cycle feels alive without reading as a warning blink. */
+.cw-optimizing-blink {
+  animation: cw-optimizing-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes cw-optimizing-pulse {
+  0%,
+  100% {
+    color: var(--chat-muted);
+  }
+  50% {
+    color: var(--chat-text);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cw-optimizing-blink {
+    animation: none;
+    color: var(--chat-muted);
+  }
+}
+
+@property --cw-optimize-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.cw-composer.cw-composer-optimizing {
+  border-color: #ffffff24;
+}
+
+/* One white segment sweeps around the composer border while the prompt is
+   being rewritten, so the card itself reads as busy. */
+.cw-composer.cw-composer-optimizing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  padding: 1px;
+  border-radius: inherit;
+  background: conic-gradient(
+    from var(--cw-optimize-angle),
+    transparent 0deg 280deg,
+    #ffffff59 318deg,
+    #ffffffb3 350deg,
+    transparent 360deg
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: cw-optimize-sweep 4.2s linear infinite;
+}
+
+@keyframes cw-optimize-sweep {
+  to {
+    --cw-optimize-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cw-composer.cw-composer-optimizing::after {
+    animation: none;
+    background: #ffffff26;
+  }
+}
+
+/* The light sheet would swallow a white band; use the primary blue instead. */
+:root[data-theme="light"] .cw-composer.cw-composer-optimizing {
+  border-color: #00000014;
+}
+:root[data-theme="light"] .cw-composer.cw-composer-optimizing::after {
+  background: conic-gradient(
+    from var(--cw-optimize-angle),
+    transparent 0deg 280deg,
+    #3d6bd680 318deg,
+    #3d6bd6cc 350deg,
+    transparent 360deg
+  );
+}
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="light"] .cw-composer.cw-composer-optimizing::after {
+    background: #3d6bd626;
+  }
+}
+
+.cw-composer-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cw-composer-body > :is(.cw-reference-strip, .cw-frame-slots) {
+  /* Reserve space for a native horizontal scrollbar below the 44px chips.
+     Keep frame slots equally tall so changing video mode never shifts the form. */
+  flex: 0 0 var(--composer-reference-height);
+  height: var(--composer-reference-height);
+  box-sizing: border-box;
+}
+
+.cw-reference-context-note {
+  flex: 0 0 auto;
+  margin: 0;
+  max-width: 100%;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--cw-prompt-dim, #7d8291);
+}
+
+.cw-reference-strip {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior: contain;
+  padding-bottom: 0;
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
+}
+
+.cw-workspace .cw-composer .cw-prompt-input {
+  /* Containing block for the empty-state hint below. */
+  position: relative;
+  display: block;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: var(--input-min-height);
+  max-height: var(--input-max-height);
+  resize: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* A generating node keeps its prompt read-only until the run settles. Dim the
+   text and its inline reference labels so it reads as a preview of what is
+   running rather than as live input. */
+.cw-workspace .cw-composer .cw-prompt-input:is([contenteditable="false"], :disabled) {
+  color: var(--cw-prompt-dim, #7d8291);
+  cursor: default;
+}
+.cw-composer .cw-prompt-input[contenteditable="false"] .cw-chat-reference {
+  color: var(--cw-prompt-dim, #7d8291);
+}
+
+/* The empty-prompt hint is drawn by ::before, not ::placeholder, so it needs
+   the themeable colour here. It is an overlay rather than in-flow content: an
+   empty editor holds only its zero-width space, so an in-flow ::before leaves
+   the caret at the end of the hint instead of the left edge. `padding: inherit`
+   keeps the overlay on the editor's content box, including the wider right pad
+   of an expanded dock. */
+.cw-composer .cw-prompt-input[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: inherit;
+  color: var(--cw-prompt-hint, #7f828d);
+  pointer-events: none;
+}
+
+.cw-composer-footer {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 4px 0 0;
+  min-width: 0;
+  min-height: 32px;
+}
+
+/* Music models take lyrics apart from the style prompt; tags sit on their own lines. */
+.cw-workspace .cw-composer .cw-prompt-input.cw-lyrics-input {
+  flex: 0 0 auto;
+  height: 72px;
+  padding-top: 6px;
+  border-top: 1px solid var(--cw-lyrics-divider, #ffffff1a);
+  font-family: inherit;
+}

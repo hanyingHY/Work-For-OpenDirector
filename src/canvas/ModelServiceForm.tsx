@@ -1,0 +1,621 @@
+import { DraftAvailabilityCheck } from "./DraftAvailabilityCheck";
+import { ProviderPicker } from "./ProviderPicker";
+import { useId, useLayoutEffect, useState, type FormEvent, type Ref } from "react";
+import { errorMessage } from "../backend/api.ts";
+import {
+  MODEL_KINDS,
+  discoverModels,
+  testAgentModel,
+  type BackendModels,
+  type ModelConfigInput,
+  type ModelOptions,
+} from "../backend/models.ts";
+import {
+  isSegmentationModel,
+  type ModelConfig,
+  type ModelKind,
+} from "../backend/rules.ts";
+import { ModelCapabilityCard } from "./ModelCapabilityCard";
+import {
+  PROVIDER_PRESETS,
+  matchingConnections,
+  providerPresetFor,
+} from "./providerPresets";
+import { CanvasIcon } from "./CanvasIcon";
+import { ModelPicker, type ModelTestResult } from "./ModelPicker";
+import { useT } from "../i18n/I18nProvider";
+import type { MessageKey } from "../i18n/types";
+import { firstRunModelKind, type FirstRunCapability } from "./firstRunModels";
+
+export type SettingsModelKind = Exclude<ModelKind, "vision">;
+const PROTOCOLS: Record<
+  SettingsModelKind,
+  readonly [ModelConfigInput["protocol"], MessageKey][]
+> = {
+  agent: [["openai", "models.protocolOption.openaiAgent"]],
+  image: [
+    ["openai", "models.protocolOption.openaiImage"],
+    ["volcengine", "models.protocolOption.volcengine"],
+    ["vllm_omni_segmentation", "models.protocolOption.segmentation"],
+  ],
+  video: [
+    ["vllm_omni", "models.protocolOption.videos"],
+    ["minimax_video_v2", "models.protocolOption.minimaxVideo"],
+    ["kling_video", "models.protocolOption.klingVideo"],
+    ["higgsfield_open", "models.protocolOption.higgsfieldOpen"],
+    ["bigmodel_video", "models.protocolOption.bigmodelVideo"],
+    ["volcengine", "models.protocolOption.volcengine"],
+    ["vllm_omni_segmentation", "models.protocolOption.segmentation"],
+    ["vllm_omni_depth", "models.protocolOption.depth"],
+  ],
+  audio: [
+    ["openai", "models.protocolOption.tts"],
+    ["volcengine", "models.protocolOption.volcengineAudio"],
+    ["vllm_omni_music", "models.protocolOption.music"],
+    ["vllm_omni_score", "models.protocolOption.score"],
+  ],
+};
+
+export function ModelServiceForm({
+  kind,
+  existing,
+  catalog,
+  capability,
+  onClose,
+  onSaved,
+  cancelButtonRef,
+  onLockChange,
+}: {
+  kind: SettingsModelKind;
+  existing?: ModelConfig;
+  catalog: BackendModels;
+  capability?: FirstRunCapability;
+  onClose: () => void;
+  onSaved?: (models: ModelConfig[]) => void;
+  cancelButtonRef?: Ref<HTMLButtonElement>;
+  onLockChange?: (capability: FirstRunCapability, locked: boolean) => void;
+}) {
+  const t = useT();
+  const connectionFieldId = useId();
+  const audioPreset = capability === "lyrics_to_music" ? "vllm-omni-music" : "vllm-omni-speech";
+  const initialProtocol = capability === "lyrics_to_music" ? "vllm_omni_music" : PROTOCOLS[kind][0][0];
+  const [connection, setConnection] = useState(existing);
+  const [presetId, setPresetId] = useState(
+    existing
+      ? providerPresetFor(existing)
+      : kind === "video"
+        ? "vllm-omni-video"
+        : kind === "image"
+          ? "vllm-omni-image"
+          : kind === "audio"
+            ? audioPreset
+            : "custom",
+  );
+  const [modelOptions, setModelOptions] = useState<
+    Record<string, ModelOptions>
+  >({});
+  const [modelErrors, setModelErrors] = useState<Record<string, string>>({});
+  const [value, setValue] = useState<ModelConfigInput>({
+    kind,
+    url: existing?.url ?? "",
+    modelId: existing?.modelId ?? "",
+    apiKey: "",
+    connectionType: existing?.connectionType ?? "self_hosted",
+    capabilityAutoCheck: existing?.capabilityAutoCheck,
+    protocol:
+      existing && isSegmentationModel(existing)
+        ? "vllm_omni_segmentation"
+        : (existing?.protocol ?? initialProtocol),
+    authMode: existing?.authMode ?? "none",
+    proxyMode: existing ? (existing.proxyMode ?? "system") : "direct",
+    videoAdapter: existing?.videoAdapter ?? "auto",
+    inputModalities:
+      kind === "agent" ? (existing ? existing.inputModalities ?? ["text"] : ["text", "image"]) : undefined,
+  });
+  const [selectedModels, setSelectedModels] = useState<string[]>(() =>
+    existing
+      ? catalog.models
+          .filter(
+            (model) =>
+              model.kind === existing.kind &&
+              (existing.providerId
+                ? model.providerId === existing.providerId
+                : model.id === existing.id),
+          )
+          .map((model) => model.modelId)
+      : [],
+  );
+  const [modelIds, setModelIds] = useState<string[]>(selectedModels);
+  const [loaded, setLoaded] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState("");
+  const [results, setResults] = useState<Record<string, ModelTestResult>>({});
+  const [testing, setTesting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [showKey, setShowKey] = useState(false);
+  const [connectionOpen, setConnectionOpen] = useState(!existing);
+  const locked = busy || discovering || testing;
+  useLayoutEffect(() => {
+    if (!capability) return;
+    onLockChange?.(capability, locked);
+    return () => onLockChange?.(capability, false);
+  }, [capability, locked, onLockChange]);
+  const continuesSetup = capability === "text_response" && Boolean(onSaved);
+  const selectedTestFailed = continuesSetup && selectedModels.some((id) => results[id]?.status === "failed");
+  const segmentation = value.protocol === "vllm_omni_segmentation";
+  const depth = value.protocol === "vllm_omni_depth";
+  const score = value.protocol === "vllm_omni_score";
+  const preset = PROVIDER_PRESETS.find((item) => item.id === presetId);
+  const mediaPresetModels = kind === "agent" ? undefined : preset?.modelsByKind?.[kind];
+  const hasSavedKey = Boolean(
+    connection &&
+    connection.authMode === "bearer" &&
+    connection.url === value.url.trim(),
+  );
+  const fetchPrerequisite = !value.url.trim()
+    ? "generation.picker.addressRequired"
+    : value.authMode === "bearer" && !value.apiKey.trim() && !hasSavedKey
+      ? "generation.picker.keyRequired"
+      : null;
+  const canFetch = fetchPrerequisite === null;
+  const canSave = canFetch && selectedModels.length > 0 && selectedModels.length <= 200 &&
+    !selectedTestFailed && !selectedModels.some((id) => modelErrors[id]);
+  const update = (patch: Partial<ModelConfigInput>) => {
+    setValue((current) => ({
+      ...current,
+      ...patch,
+      ...(["minimax_video_v2", "kling_video", "bigmodel_video", "higgsfield_open"].includes(patch.protocol ?? "")
+        ? ({
+            connectionType: "api",
+            authMode: "bearer",
+            videoAdapter: "auto",
+          } as const)
+        : {}),
+    }));
+    const connectionChanged =
+      patch.url !== undefined ||
+      patch.apiKey !== undefined ||
+      patch.protocol !== undefined ||
+      patch.connectionType !== undefined ||
+      patch.authMode !== undefined;
+    if (connectionChanged || patch.proxyMode !== undefined) {
+      setModelIds(selectedModels);
+      setLoaded(false);
+      setDiscoveryError("");
+    }
+    if (
+      connectionChanged ||
+      patch.proxyMode !== undefined ||
+      patch.capabilityAutoCheck !== undefined
+    ) setResults({});
+    if (patch.protocol !== undefined && patch.protocol !== value.protocol) {
+      setModelOptions(
+        Object.fromEntries(
+          selectedModels.map((id) => [
+            id,
+            { videoAdapter: "auto", videoCapabilities: null },
+          ]),
+        ),
+      );
+      setModelErrors({});
+    }
+    setError("");
+  };
+  const loadModels = async () => {
+    if (fetchPrerequisite) {
+      setDiscoveryError(t(fetchPrerequisite));
+      if (fetchPrerequisite === "generation.picker.addressRequired") setConnectionOpen(true);
+      return;
+    }
+    setDiscovering(true);
+    setDiscoveryError("");
+    try {
+      const models = mediaPresetModels
+        ? [...mediaPresetModels]
+        : (await discoverModels(value, connection?.id)).models;
+      setModelIds(models);
+      if (mediaPresetModels && !connection) setSelectedModels(models);
+      setLoaded(true);
+      setConnectionOpen(false);
+    } catch (failure) {
+      setDiscoveryError(t("generation.picker.retry", { error: errorMessage(failure) }));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+  const test = async (id: string) => {
+    setTesting(true);
+    setResults((current) => ({
+      ...current,
+      [id]: { status: "running", message: t("models.service.testing") },
+    }));
+    try {
+      const result = await testAgentModel(
+        { ...value, ...optionsFor(id), modelId: id },
+        connection?.id,
+      );
+      setResults((current) => ({
+        ...current,
+        [id]: {
+          status: "passed",
+          message: t("models.service.testPassed", {
+            seconds: (result.elapsedMs / 1000).toFixed(2),
+          }),
+        },
+      }));
+    } catch (failure) {
+      setResults((current) => ({
+        ...current,
+        [id]: { status: "failed", message: errorMessage(failure) },
+      }));
+    } finally {
+      setTesting(false);
+    }
+  };
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (locked || !canSave) return;
+    setBusy(true);
+    setError("");
+    try {
+      const { inputModalities, videoAdapter, videoCapabilities, ...shared } =
+        value;
+      const saved = await catalog.saveMany(
+        shared,
+        selectedModels,
+        connection?.id,
+        Object.fromEntries(
+          selectedModels.map((id) => [id, optionsFor(id)]),
+        ),
+      );
+      if (onSaved) onSaved(saved);
+      else onClose();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const chooseProvider = (id: string) => {
+    const preset = PROVIDER_PRESETS.find((item) => item.id === id);
+    setPresetId(id);
+    setConnection(undefined);
+    const presetModels = [...(preset?.modelsByKind?.[kind] ?? [])];
+    setSelectedModels(presetModels);
+    setModelIds(presetModels);
+    setModelOptions({});
+    setModelErrors({});
+    setLoaded(false);
+    setResults({});
+    setDiscoveryError("");
+    setError("");
+    setConnectionOpen(id === "custom" || !preset || preset.connectionType === "self_hosted");
+    setValue({
+      kind,
+      modelId: "",
+      apiKey: "",
+      videoAdapter: "auto",
+      url: preset?.url ?? "",
+      protocol: preset?.protocol ?? PROTOCOLS[kind][0][0],
+      connectionType: preset?.connectionType ?? "self_hosted",
+      authMode: preset?.authMode ?? "none",
+      proxyMode: "direct",
+    });
+  };
+  const reuseConnection = (model: ModelConfig) => {
+    setConnection(model);
+    setValue({
+      kind,
+      url: model.url,
+      modelId: model.modelId,
+      connectionType: model.connectionType,
+      capabilityAutoCheck: model.capabilityAutoCheck,
+      inputModalities: model.inputModalities,
+      videoAdapter: model.videoAdapter,
+      videoCapabilities: model.videoCapabilities,
+      protocol: model.protocol ?? PROTOCOLS[kind][0][0],
+      authMode: model.authMode ?? "bearer",
+      proxyMode: model.proxyMode ?? "system",
+      apiKey: "",
+    });
+    const peers = catalog.models.filter(
+      (item) =>
+        item.kind === kind &&
+        (model.providerId
+          ? item.providerId === model.providerId
+          : item.id === model.id),
+    );
+    setSelectedModels(peers.map((item) => item.modelId));
+    setModelIds(peers.map((item) => item.modelId));
+    setLoaded(false);
+    setDiscoveryError("");
+    setModelOptions({});
+    setModelErrors({});
+    setResults({});
+    setConnectionOpen(false);
+  };
+  const connections = matchingConnections(catalog.models, kind, value);
+  const savedModel = (id: string) =>
+    catalog.models.find(
+      (model) =>
+        model.modelId === id &&
+        connection &&
+        (connection.providerId
+          ? model.providerId === connection.providerId
+          : model.id === connection.id),
+    );
+  function optionsFor(id: string): ModelOptions {
+    if (kind !== "agent") return modelOptions[id] ?? {};
+    const saved = savedModel(id);
+    return {
+      inputModalities: saved ? saved.inputModalities ?? ["text"] : ["text", "image"],
+      ...modelOptions[id],
+    };
+  }
+  return (
+    <form
+      className="cw-model-editor"
+      aria-label={existing ? t("models.service.edit") : t("models.service.add")}
+      autoComplete="off"
+      onSubmit={(event) => void submit(event)}
+      onInvalid={() => setConnectionOpen(true)}
+    >
+      <header className="cw-model-editor-header">
+        <button
+          type="button"
+          className="cw-settings-button cw-settings-button-icon"
+          aria-label={t("models.service.back")}
+          onClick={onClose}
+          disabled={locked}
+        >
+          <CanvasIcon name="back" size={18} />
+        </button>
+        <div>
+          <h3>{existing ? t("models.service.edit") : t("models.service.add")}</h3>
+          <p>
+            {(() => {
+              const kindSpec = MODEL_KINDS.find((item) => item.id === kind);
+              return kindSpec ? t(kindSpec.labelKey) : null;
+            })()}
+          </p>
+        </div>
+      </header>
+      <div className="cw-model-editor-scroll">
+        <ProviderPicker
+          kind={kind}
+          allowProtocol={capability ? (protocol) => firstRunModelKind({ kind, protocol }, capability) : undefined}
+          value={presetId}
+          disabled={locked}
+          onChange={chooseProvider}
+        />
+        {!connection && connections.length > 0 && (
+          <div className="cw-provider-reuse">
+            <span>{t("models.service.existingConnections")}</span>
+            {connections.map((model) => (
+              <button
+                key={model.id}
+                type="button"
+                className="cw-settings-button"
+                onClick={() => reuseConnection(model)}
+              >
+                {t("models.service.reuseConnection", {
+                  model: model.modelId,
+                })}
+              </button>
+            ))}
+            <small>{t("models.service.reuseHint")}</small>
+          </div>
+        )}
+        <details
+          className="cw-model-connection-details"
+          open={connectionOpen}
+          onToggle={(event) => setConnectionOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <span>{t("models.service.advancedConnection")}</span>
+            <span title={value.url}>
+              {connectionOpen
+                ? t("models.service.addressAndAuth")
+                : value.url || t("models.service.notConfigured")}
+            </span>
+            <CanvasIcon name="chevron" size={16} />
+          </summary>
+          <fieldset
+            className="cw-model-connection"
+            aria-label={t("models.service.connectionInfo")}
+            disabled={locked}
+          >
+            <div className="cw-model-connection-field">
+              <label>
+                {t("models.service.url")}
+                <input
+                  type="url"
+                  required
+                  maxLength={2048}
+                  value={value.url}
+                  placeholder={t("models.service.urlPlaceholder")}
+                  aria-describedby={`${connectionFieldId}-url-note`}
+                  onChange={(event) => update({ url: event.target.value })}
+                />
+              </label>
+              <p className="cw-model-note" id={`${connectionFieldId}-url-note`}>
+                {t(presetId === "bailian-beijing"
+                  ? "models.service.beijingWorkspaceUrl"
+                  : "models.service.urlNote")}
+              </p>
+            </div>
+            <div className="cw-model-connection-field">
+              <label>
+                {t("models.service.proxyMode")}
+                <select
+                  value={value.proxyMode}
+                  aria-describedby={`${connectionFieldId}-proxy-note`}
+                  onChange={(event) =>
+                    update({
+                      proxyMode: event.target.value as "system" | "direct",
+                    })
+                  }
+                >
+                  <option value="system">
+                    {t("models.service.proxySystem")}
+                  </option>
+                  <option value="direct">
+                    {t("models.service.proxyDirect")}
+                  </option>
+                </select>
+              </label>
+              <p className="cw-model-note" id={`${connectionFieldId}-proxy-note`}>
+                {t("models.service.proxyNote")}
+              </p>
+            </div>
+            <div className="cw-model-connection-field">
+              <label><input type="checkbox" checked={value.capabilityAutoCheck ?? value.connectionType === "self_hosted"}
+                onChange={(event) => update({ capabilityAutoCheck: event.target.checked })} />{t("availability.autoCheck")}</label>
+            </div>
+          </fieldset>
+        </details>
+        <fieldset
+          className="cw-model-connection cw-provider-key"
+          disabled={locked}
+        >
+          <div className="cw-model-key-heading">
+            <label htmlFor={`${connectionFieldId}-key`}>API Key</label>
+            <label className="cw-model-no-auth">
+              <input
+                type="checkbox"
+                checked={value.authMode === "none"}
+                onChange={(event) =>
+                  update({
+                    authMode: event.target.checked ? "none" : "bearer",
+                  })
+                }
+              />
+              {t("models.service.noKey")}
+            </label>
+          </div>
+          <div className="cw-model-key-input">
+            <input
+              id={`${connectionFieldId}-key`}
+              type={showKey ? "text" : "password"}
+              disabled={value.authMode === "none"}
+              required={value.authMode === "bearer" && !hasSavedKey}
+              maxLength={8192}
+              value={value.authMode === "none" ? "" : value.apiKey}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={
+                value.authMode === "none"
+                  ? t("models.service.noAuthPlaceholder")
+                  : hasSavedKey
+                    ? t("models.service.savedKeyPlaceholder")
+                    : value.protocol === "higgsfield_open"
+                      ? "KEY_ID:KEY_SECRET"
+                    : t("models.service.apiKeyPlaceholder")
+              }
+              onChange={(event) => update({ apiKey: event.target.value })}
+            />
+            <button
+              type="button"
+              disabled={value.authMode === "none"}
+              aria-label={
+                showKey ? t("models.service.hideKey") : t("models.service.showKey")
+              }
+              onClick={() => setShowKey(!showKey)}
+            >
+              {showKey ? t("models.service.hide") : t("models.service.show")}
+            </button>
+          </div>
+        </fieldset>
+        {["minimax_video_v2", "kling_video", "bigmodel_video"].includes(value.protocol) && (
+          <p className="cw-model-note">{t("models.service.minimaxNote")}</p>
+        )}
+        {value.protocol === "higgsfield_open" && (
+          <p className="cw-model-note">{t("models.service.higgsfieldNote")}</p>
+        )}
+        <ModelPicker
+          modelPlaceholder={t("models.service.modelPlaceholder")}
+          available={modelIds}
+          selected={selectedModels}
+          loaded={loaded}
+          loading={discovering}
+          loadsPreset={Boolean(mediaPresetModels)}
+          error={discoveryError}
+          disabled={locked}
+          canFetch={canFetch}
+          onFetch={() => void loadModels()}
+          onChange={(ids) => {
+            setSelectedModels(ids);
+            setError("");
+          }}
+          onTest={kind === "agent" ? (id) => void test(id) : undefined}
+          results={results}
+          renderDetails={(id) => (
+            <>
+            <DraftAvailabilityCheck connection={{ ...value, ...optionsFor(id) }} configId={connection?.id} modelId={id} />
+            <ModelCapabilityCard
+              key={`${connection?.id ?? "new"}:${value.protocol}:${id}`}
+              modelId={id}
+              connection={value}
+              configId={connection?.id}
+              saved={savedModel(id)}
+              options={optionsFor(id)}
+              disabled={locked}
+              onChange={(patch) =>
+                setModelOptions((current) => ({
+                  ...current,
+                  [id]: { ...current[id], ...patch },
+                }))
+              }
+              onValidity={(message) =>
+                setModelErrors((current) => ({ ...current, [id]: message }))
+              }
+            />
+            </>
+          )}
+        />
+        {segmentation && (
+          <p className="cw-model-note">
+            {t("models.service.segmentationNote")}
+          </p>
+        )}
+        {depth && (
+          <p className="cw-model-note">{t("models.service.depthNote")}</p>
+        )}
+        {score && (
+          <p className="cw-model-note">{t("models.service.scoreNote")}</p>
+        )}
+      </div>
+      <footer className="cw-model-editor-footer">
+        <div className="cw-model-save-status" role={error || selectedTestFailed ? "alert" : "status"}>
+          {error ||
+            selectedModels.map((id) => modelErrors[id]).find(Boolean) ||
+            (selectedTestFailed ? t("firstRun.modelTestFailed") : "") ||
+            (selectedModels.length > 200
+              ? t("models.service.tooManyModels")
+              : selectedModels.length
+                ? t("models.service.willEnable", {
+                    count: selectedModels.length,
+                  })
+                : t("models.service.selectAtLeastOne"))}
+        </div>
+        <button
+          ref={cancelButtonRef}
+          className="cw-settings-button"
+          type="button"
+          disabled={locked}
+          onClick={onClose}
+        >
+          {t("models.service.cancel")}
+        </button>
+        <button
+          className="cw-settings-button cw-settings-button-primary"
+          type="submit"
+          disabled={locked || !canSave}
+        >
+          {t(busy ? "models.service.saving" : continuesSetup ? "models.service.saveAndContinue" : "models.service.save")}
+        </button>
+      </footer>
+    </form>
+  );
+}

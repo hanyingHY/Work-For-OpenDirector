@@ -1,0 +1,1250 @@
+/** Full bilingual voice-library UI with real storage/media and mocked provider HTTP. */
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir } from "node:fs/promises";
+import { launchBrowser } from "./engine.mjs";
+const api = process.env.CREATION_API_URL ?? "http://127.0.0.1:8030";
+const base = process.env.CREATION_WEB_URL ?? "http://127.0.0.1:5190";
+const output =
+  process.env.VOICE_SCREENSHOTS ?? "/tmp/opendirector-voice-evidence";
+const headers = {
+  "X-OpenDirector-Request": "1",
+  "Content-Type": "application/json",
+};
+// Reopening includes cold module loading, project recovery and asset fetching.
+// Keep ordinary interaction waits short, but budget this whole path explicitly.
+const reopenTimeout = 45000;
+// Optional deterministic slow-CI probe for the reopened asset request.
+const reopenDelay = Number(process.env.VOICE_REOPEN_DELAY_MS ?? 0);
+assert.ok(
+  Number.isFinite(reopenDelay) && reopenDelay >= 0 && reopenDelay < reopenTimeout,
+);
+async function waitForSaved(page, label) {
+  await page.getByText(label, { exact: true }).waitFor({ timeout: reopenTimeout });
+}
+const readTimeout = 15000;
+async function call(path, body, origin = api) {
+  const response = await fetch(origin + path, {
+    headers,
+    ...(body ? { method: "POST", body: JSON.stringify(body) } : {}),
+  });
+  assert.ok(response.ok, await response.clone().text());
+  return response.json();
+}
+async function until(check) {
+  for (let i = 0; i < 200; i++) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw Error("Expected persisted voice state was not observed");
+}
+async function reopenAudio(page, assetPath, savedLabel) {
+  await waitForSaved(page, savedLabel);
+  // Acknowledge this page's lease release before reopening its persisted audio.
+  const released = page.waitForResponse(response => response.request().method() === "DELETE" &&
+    new URL(response.url()).pathname.startsWith("/api/creation/sessions/"));
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide")));
+  assert.ok((await released).ok());
+  const started = Date.now();
+  const statuses = [];
+  let receive, timer;
+  const received = new Promise((resolve) => { receive = resolve; });
+  const observe = (response) => {
+    if (new URL(response.url()).pathname !== assetPath ||
+        response.request().method() !== "GET") return;
+    statuses.push(response.status());
+    receive(response);
+  };
+  page.on("response", observe);
+  try {
+    // Observe early responses, but give navigation its own deadline. A cold
+    // document has not started the project's media read yet.
+    await page.reload({ waitUntil: "domcontentloaded", timeout: reopenTimeout });
+    await waitForSaved(page, savedLabel);
+    console.log(JSON.stringify({
+      event: "voice-reopen-ready", assetPath, elapsedMs: Date.now() - started,
+    }));
+    return await Promise.race([
+      received,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `No reopened audio response; statuses=${JSON.stringify(statuses)}`,
+        )), reopenTimeout);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    page.off("response", observe);
+  }
+}
+async function fixtureRoot(origin) {
+  const [voices, generation] = await Promise.all([
+    call("/api/voice-test-health", undefined, origin),
+    call("/api/creation-test-health", undefined, origin),
+  ]);
+  assert.equal(voices.isolated, true);
+  assert.equal(voices.provider, "httpx-mock");
+  assert.equal(generation.isolated, true);
+  assert.equal(generation.provider, "fixture");
+  assert.ok(generation.root);
+  return generation.root;
+}
+assert.equal(
+  await fixtureRoot(base),
+  await fixtureRoot(api),
+  "Vite must proxy to the same isolated fixture",
+);
+const common = {
+  kind: "audio",
+  url: "http://voice.test/v1",
+  apiKey: "fixture-only-no-real-service",
+  connectionType: "self_hosted",
+  protocol: "openai",
+  authMode: "bearer",
+};
+const configs = await call("/api/model-configs/batch", {
+  ...common,
+  modelIds: ["MOSS-TTS", "MOSS-TTS-Nano", "MOSS-TTS-Drama3"],
+});
+const other = await call("/api/model-configs", {
+  ...common,
+  url: "http://voice-b.test/v1",
+  modelId: "MOSS-TTS",
+});
+const cloud = await call("/api/model-configs", {
+  ...common,
+  url: "https://api.mosi.cn/v1",
+  modelId: "moss-tts-1.5-flash",
+  connectionType: "api",
+});
+const searchCloud = await call("/api/model-configs", {
+  ...common,
+  url: "https://api.mosi.cn/v1",
+  modelId: "moss-tts-1.0-pro",
+  connectionType: "api",
+  apiKey: "voice-search-fixture",
+});
+const [normal, nano, drama] = configs;
+assert.equal(
+  normal.inputRules.voiceLibrary.connectionId,
+  nano.inputRules.voiceLibrary.connectionId,
+);
+const wav = Buffer.alloc(44 + 64000);
+wav.write("RIFF");
+wav.writeUInt32LE(wav.length - 8, 4);
+wav.write("WAVEfmt ", 8);
+wav.writeUInt32LE(16, 16);
+wav.writeUInt16LE(1, 20);
+wav.writeUInt16LE(1, 22);
+wav.writeUInt32LE(16000, 24);
+wav.writeUInt32LE(32000, 28);
+wav.writeUInt16LE(2, 32);
+wav.writeUInt16LE(16, 34);
+wav.write("data", 36);
+wav.writeUInt32LE(64000, 40);
+// Live WebM, like MediaRecorder output, has no duration in its container header.
+function liveWebm(seconds) {
+  return execFileSync("ffmpeg", [
+    "-nostdin", "-v", "error", "-f", "lavfi", "-i", "sine=sample_rate=16000",
+    "-t", String(seconds), "-c:a", "libopus", "-f", "webm", "-live", "1", "pipe:1",
+  ]);
+}
+const validWebm = liveWebm(2);
+const longWebm = liveWebm(31);
+const copy = {
+  "en-US": {
+    settings: "Settings", models: "Model connections", audioOverview: "Audio model",
+    addService: "Add service", provider: "Provider", speech: "MiniMax Official Speech",
+    url: "Service URL (Base URL)", saveService: "Save service", manage: "Manage",
+    addModel: "Add manually", unsupportedModel: "Unsupported MiniMax speech model. Choose a model from the preset.",
+    cancel: "Cancel", closeSettings: "Close settings",
+    tools: "Canvas creation tools",
+    add: "Add Audio",
+    model: "Generation model",
+    prompt: "Text to read",
+    textLimit: "This model accepts up to 3000 prompt characters. Shorten the prompt and try again.",
+    library: "Voice library",
+    all: "All voices",
+    mine: "My voices",
+    favorites: "Favorites",
+    create: "Create voice",
+    name: "Voice name",
+    recording: "Reference recording",
+    preview: "Preview Sample voice",
+    stop: "Stop previewing Sample voice",
+    noPreview: "No preview available for Alice",
+    selectableWithoutPreview: "No preview available. Select Cloud voice.",
+    favorite: "Favorite Sample voice",
+    unfavorite: "Unfavorite Sample voice",
+    language: "Language",
+    gender: "Gender",
+    transcript: "Recording transcript",
+    optional: "Recording transcript (optional)",
+    consent: "Consent recording ID",
+    generate: "Generate",
+    saved: "Saved on this device",
+    delete: "Delete voice",
+    actions: "More actions for ",
+    retry: "Retry",
+    previousPage: "Previous page",
+    nextPage: "Next page",
+    search: "Search voices",
+    clearSearch: "Clear search",
+    noSearchMatches: "No voices match your search.",
+    searchingMore: "Searching more voices…",
+    previewSearchResult: "Preview 世界最狂青年音",
+    stopSearchPreview: "Stop previewing 世界最狂青年音",
+    selectionMissing:
+      "The selected voice is no longer in this library. Choose another voice before generating.",
+  },
+  "zh-CN": {
+    settings: "设置", models: "模型接入", audioOverview: "音频模型",
+    addService: "添加服务", provider: "提供商", speech: "MiniMax 官方语音",
+    url: "服务地址（Base URL）", saveService: "保存服务", manage: "管理",
+    addModel: "手动添加", unsupportedModel: "不支持该 MiniMax 语音型号，请选择预设中的型号。",
+    cancel: "取消", closeSettings: "关闭设置",
+    tools: "画布创作工具",
+    add: "添加音频",
+    model: "生成模型",
+    prompt: "朗读文本",
+    textLimit: "当前模型的提示词最多 3000 个字符，请缩短后重试。",
+    library: "音色库",
+    all: "全部音色",
+    mine: "我的音色",
+    favorites: "收藏",
+    create: "创建音色",
+    name: "音色名称",
+    recording: "参考录音",
+    preview: "试听 Sample voice",
+    stop: "停止试听 Sample voice",
+    noPreview: "Alice 暂无试听音频",
+    selectableWithoutPreview: "暂无试听音频。选择 Cloud voice。",
+    favorite: "收藏 Sample voice",
+    unfavorite: "取消收藏 Sample voice",
+    language: "语言",
+    gender: "性别",
+    transcript: "录音逐字稿",
+    optional: "录音逐字稿（选填）",
+    consent: "授权录音 ID",
+    generate: "提交生成",
+    saved: "已保存到本机",
+    delete: "删除音色",
+    actions: "",
+    retry: "重试",
+    previousPage: "上一页",
+    nextPage: "下一页",
+    search: "搜索音色",
+    clearSearch: "清除搜索",
+    noSearchMatches: "没有找到匹配的音色。",
+    searchingMore: "正在搜索更多音色…",
+    previewSearchResult: "试听 世界最狂青年音",
+    stopSearchPreview: "停止试听 世界最狂青年音",
+    selectionMissing: "所选音色已不在此音色库中。生成前请选择其他音色。",
+  },
+};
+async function verifyPaginatedSearch({ dialog, L, open, page, params, selectModel }) {
+  await selectModel(searchCloud);
+  await open();
+  const library = dialog();
+  const search = library.getByRole("searchbox", { name: L.search, exact: true });
+  const clear = library.getByRole("button", { name: L.clearSearch, exact: true });
+  const previous = library.getByRole("button", { name: L.previousPage, exact: true });
+  const next = library.getByRole("button", { name: L.nextPage, exact: true });
+  const voice = (name) => library.getByRole("button", { name, exact: true });
+  const tab = (name) => library.getByRole("tab", { name, exact: true });
+  const cards = library.locator(".cw-voice-name");
+  const noMatches = library.getByText(L.noSearchMatches, { exact: true });
+  const first = voice("Alto 001");
+  const fromNextProviderPage = voice("Alto 150");
+  const last = voice("Alto 151");
+  const lateChinese = voice("世界最狂青年音");
+
+  await first.waitFor();
+  assert.equal(await lateChinese.count(), 0);
+  assert.equal(await previous.isDisabled(), true);
+  await next.click();
+  await lateChinese.waitFor();
+  assert.equal(await first.count(), 0);
+
+  const searchPageRequest = (url) =>
+    url.pathname === "/api/voices" &&
+    url.searchParams.get("modelConfigId") === searchCloud.id &&
+    url.searchParams.get("pageSize") === "100";
+  const cursors = [];
+  let releasePage;
+  const heldPage = new Promise((resolve) => { releasePage = resolve; });
+  const pending = library.getByRole("status").filter({ hasText: L.searchingMore });
+  await page.route(searchPageRequest, async (route) => {
+    const cursor = new URL(route.request().url()).searchParams.get("after");
+    cursors.push(cursor);
+    if (cursor && cursors.length === 1) {
+      await heldPage;
+      return route.fulfill({
+        status: 502,
+        json: { code: "voice_provider_error", detail: "Fixture later page unavailable" },
+      });
+    }
+    return route.continue();
+  });
+  try {
+    await search.fill("  aLtO  ");
+    await pending.waitFor();
+    await until(() => cursors.length > 0);
+    assert.equal(cursors.length, 1);
+    const deferredCursor = cursors[0];
+    assert.ok(deferredCursor, "Search must reuse the loaded first provider page");
+    await first.waitFor();
+    assert.equal(await cards.count(), 149);
+    assert.equal(await fromNextProviderPage.count(), 0);
+    assert.equal(await pending.isVisible(), true);
+
+    await search.fill("青年");
+    await first.waitFor({ state: "hidden" });
+    assert.equal(await pending.isVisible(), true);
+    assert.equal(await noMatches.count(), 0, "The later page may contain a match");
+    await search.fill("  aLtO  ");
+    await first.waitFor();
+    releasePage();
+
+    const alert = library.getByRole("alert");
+    await alert.waitFor();
+    assert.equal(await first.isVisible(), true, "The first page stays visible after a later error");
+    assert.equal(await noMatches.count(), 0);
+    await library.getByRole("button", { name: L.retry, exact: true }).click();
+    await fromNextProviderPage.waitFor();
+    await pending.waitFor({ state: "hidden" });
+    await alert.waitFor({ state: "hidden" });
+    assert.deepEqual(cursors, [deferredCursor, deferredCursor]);
+  } finally {
+    releasePage();
+    await page.unroute(searchPageRequest);
+  }
+  // One unmatching voice on provider page one makes Alto 150 appear on the
+  // first results page only when matching precedes pagination.
+  assert.equal(await cards.count(), 150);
+  assert.equal(await fromNextProviderPage.count(), 1);
+  assert.equal(await voice("Unrelated voice").count(), 0);
+  assert.equal(await previous.isDisabled(), true);
+  await next.click();
+  await last.waitFor();
+  assert.deepEqual(await cards.allTextContents(), ["Alto 151"]);
+  assert.equal(await next.isDisabled(), true);
+
+  await search.fill("alto 0");
+  await first.waitFor();
+  assert.equal(await cards.count(), 99);
+  assert.equal(await previous.count(), 0);
+  assert.equal(await next.count(), 0);
+  await search.fill("aLtO");
+  await next.click();
+  await last.waitFor();
+  const lastRow = library.locator(".cw-voice-entry").filter({
+    has: page.getByRole("button", { name: "Alto 151", exact: true }),
+  });
+  const favorite = lastRow.locator(".cw-voice-favorite");
+  assert.equal(await favorite.getAttribute("aria-pressed"), "false");
+  await lastRow.hover();
+  await favorite.click();
+  await tab(L.favorites).click();
+  assert.equal(await search.inputValue(), "aLtO");
+  assert.deepEqual(await cards.allTextContents(), ["Alto 151"]);
+  assert.equal(await previous.count(), 0);
+  await tab(L.all).click();
+  await clear.click();
+  assert.equal(await search.inputValue(), "");
+  // This voice is excluded by the query and only lives on the first provider
+  // page. Its return proves that browsing has moved back to page one.
+  await voice("Unrelated voice").waitFor();
+  assert.equal(await previous.isDisabled(), true);
+  assert.equal(await next.isEnabled(), true);
+  assert.equal(await last.count(), 0);
+
+  const expectFavoriteWithoutSearch = async () => {
+    await tab(L.favorites).click();
+    assert.equal(await search.inputValue(), "");
+    await last.waitFor();
+    assert.deepEqual(await cards.allTextContents(), ["Alto 151"]);
+    assert.equal(await favorite.getAttribute("aria-pressed"), "true");
+  };
+  const closeLibrary = async () => {
+    await page.keyboard.press("Escape");
+    await library.waitFor({ state: "hidden" });
+  };
+  await expectFavoriteWithoutSearch();
+  await closeLibrary();
+
+  let laterRequests = 0;
+  const countLaterRequests = (request) => {
+    const { pathname, searchParams } = new URL(request.url());
+    if (
+      pathname === "/api/voices" &&
+      searchParams.get("modelConfigId") === searchCloud.id &&
+      searchParams.has("after")
+    ) {
+      laterRequests += 1;
+    }
+  };
+  page.on("request", countLaterRequests);
+  try {
+    await open();
+    await expectFavoriteWithoutSearch();
+    assert.equal(laterRequests, 0, "The saved favorite needs no later provider page on reopen");
+    await closeLibrary();
+
+    const removedRecords = await page.evaluate(() => {
+      const recordKeys = Object.keys(localStorage).filter((key) =>
+        key.startsWith("opendirector.voiceFavoriteRecords.v1:") &&
+        localStorage.getItem(key)?.includes('"search-alto-151"'),
+      );
+      for (const key of recordKeys) localStorage.removeItem(key);
+      return recordKeys.length;
+    });
+    assert.equal(removedRecords, 1);
+    await open();
+    await expectFavoriteWithoutSearch();
+    assert.ok(laterRequests > 0, "A legacy favorite ID is resolved from its provider page");
+  } finally {
+    page.off("request", countLaterRequests);
+  }
+
+  await search.fill("青年");
+  await noMatches.waitFor();
+  await tab(L.all).click();
+  assert.equal(await search.inputValue(), "青年");
+  await lateChinese.waitFor();
+  assert.deepEqual(await cards.allTextContents(), ["青年", "世界最狂青年音"]);
+  await search.fill("search-younger");
+  await noMatches.waitFor();
+  await search.fill("青年");
+  await lateChinese.waitFor();
+  await library.getByRole("button", { name: L.previewSearchResult, exact: true }).click();
+  await library.getByRole("button", { name: L.stopSearchPreview, exact: true }).click();
+  await lateChinese.click();
+  assert.equal(await library.count(), 0);
+  await until(async () => (await params()).voiceSelection?.voiceId === "search-younger");
+}
+
+await mkdir(output, { recursive: true });
+const browser = await launchBrowser();
+const errors = [];
+try {
+  for (const [locale, L] of Object.entries(copy)) {
+    const page = await browser.newPage({
+      viewport: { width: 1500, height: 1000 },
+    });
+    page.setDefaultTimeout(readTimeout);
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (
+        /^https?:\/\/(voice\.test|voice-b\.test|api\.mosi\.cn|api\.minimax\.cn)/.test(
+          request.url(),
+        )
+      )
+        errors.push("Browser contacted provider");
+    });
+    const id = crypto.randomUUID();
+    await call(`/api/creation/projects/${id}/commands`, {
+      commandId: crypto.randomUUID(),
+      projectId: id,
+      type: "project.create",
+      payload: { name: `Voice library ${locale} ${id.slice(0, 8)}` },
+    });
+    const state = () => call(`/api/creation/projects/${id}`);
+    const params = async () => (await state()).generationSpecs[0]?.parameters;
+    await page.addInitScript((locale) => {
+      localStorage.setItem("opendirector.modelSetup.v1", "dismissed");
+      localStorage.setItem("opendirector.locale.v1", locale);
+      // Observe the actual fetch -> Blob -> player URL without importing a
+      // development-only application module; this also runs against previews.
+      const sources = new WeakMap();
+      const urls = new Map();
+      window.__voiceMediaSources = urls;
+      const fetchMedia = window.fetch.bind(window);
+      window.fetch = async (...args) => {
+        const response = await fetchMedia(...args);
+        const readBlob = response.blob.bind(response);
+        response.blob = async (...args) => {
+          const blob = await readBlob(...args);
+          sources.set(blob, response.url);
+          return blob;
+        };
+        return response;
+      };
+      const create = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => {
+        const url = create(blob);
+        if (sources.has(blob)) urls.set(url, sources.get(blob));
+        return url;
+      };
+    }, locale);
+    const open = () =>
+      page.getByRole("button", { name: L.library, exact: true }).click();
+    const dialog = () =>
+      page.getByRole("dialog", { name: L.library, exact: true });
+    const assertSelectedVoice = async (expectedName) => {
+      const choices = dialog().locator(".cw-voice-name");
+      await choices.first().waitFor();
+      const pressed = choices.and(dialog().getByRole("button", { pressed: true }));
+      const unpressed = dialog().locator('.cw-voice-name[aria-pressed="false"]');
+      assert.deepEqual(await pressed.allTextContents(), expectedName ? [expectedName] : []);
+      assert.equal(await unpressed.count(), await choices.count() - (expectedName ? 1 : 0));
+    };
+    const selectModel = async (config) => {
+      await page.getByRole("combobox", { name: L.model, exact: true }).click();
+      await page
+        .getByRole("listbox", { name: L.model, exact: true })
+        .locator(`[data-option-id="config:${config.id}"]`)
+        .click();
+      await until(
+        async () =>
+          (await state()).generationSpecs[0]?.modelConfigId === config.id,
+      );
+    };
+    try {
+      await page.goto(`${base}/ai-tool/ai-canvas/${id}?creation=unified`, {
+        waitUntil: "domcontentloaded",
+        timeout: reopenTimeout,
+      });
+      await waitForSaved(page, L.saved);
+      await page
+        .getByRole("toolbar", { name: L.tools })
+        .getByRole("button", { name: L.add, exact: true })
+        .click();
+      await selectModel(normal);
+      await page
+        .getByRole("textbox", { name: L.prompt, exact: true })
+        .fill("Hello from the voice library.");
+      let releaseList;
+      const listingGate = new Promise((resolve) => {
+        releaseList = resolve;
+      });
+      let failFirstList = true;
+      await page.route("**/api/voices?**", async (route) => {
+        if (route.request().method() !== "GET" || !failFirstList)
+          return route.continue();
+        await listingGate;
+        return route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: "Fixture listing unavailable",
+            code: "voice_provider_error",
+          }),
+        });
+      });
+      await open();
+      await dialog().getByRole("status").waitFor();
+      releaseList();
+      await dialog().getByRole("alert").waitFor();
+      failFirstList = false;
+      await dialog()
+        .getByRole("button", { name: L.retry, exact: true })
+        .click();
+      await dialog()
+        .getByRole("button", { name: "Sample voice", exact: true })
+        .waitFor();
+      await assertSelectedVoice(null);
+      assert.equal(await dialog().getByRole("tab").count(), 3);
+      const search = dialog().getByRole("searchbox", { name: L.search, exact: true });
+      const alice = dialog().getByRole("button", { name: "Alice", exact: true });
+      await search.fill("aLiCe");
+      await alice.waitFor();
+      assert.equal(await dialog().locator(".cw-voice-name").count(), 1);
+      await dialog().getByRole("tab", { name: L.mine, exact: true }).click();
+      await dialog().getByText(L.noSearchMatches, { exact: true }).waitFor();
+      assert.equal(await search.inputValue(), "aLiCe");
+      await dialog().getByRole("button", { name: L.clearSearch, exact: true }).click();
+      await dialog().getByRole("button", { name: "Sample voice", exact: true }).waitFor();
+      assert.equal(await alice.count(), 0);
+      await dialog().getByRole("tab", { name: L.all, exact: true }).click();
+      await alice.waitFor();
+      assert.equal(
+        await dialog()
+          .locator(".cw-voice-grid")
+          .evaluate(
+            (el) => getComputedStyle(el).gridTemplateColumns.split(" ").length,
+          ),
+        4,
+      );
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: L.create, exact: true })
+          .count(),
+        1,
+      );
+      const noPreview = dialog().getByRole("img", { name: L.noPreview, exact: true });
+      assert.equal(await noPreview.count(), 1);
+      await noPreview.hover();
+      assert.equal(await noPreview.getAttribute("title"), L.noPreview);
+      assert.equal(await noPreview.evaluate(el => getComputedStyle(el).cursor), "default");
+      await noPreview.click();
+      await dialog().locator(".cw-voice-entry").filter({
+        has: page.getByRole("button", { name: "Alice", exact: true }),
+      }).click({ position: { x: 8, y: 8 } });
+      assert.equal((await params()).voiceSelection, undefined);
+      assert.ok(await dialog().getByRole("button", { name: "Alice", exact: true }).isDisabled());
+      assert.equal(await dialog().getByRole("combobox").count(), 2);
+      await dialog()
+        .getByRole("combobox", { name: L.language, exact: true })
+        .selectOption("English");
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: "Alice", exact: true })
+          .count(),
+        0,
+      );
+      await dialog()
+        .getByRole("combobox", { name: L.language, exact: true })
+        .selectOption("");
+      await dialog()
+        .getByRole("button", { name: L.preview, exact: true })
+        .click();
+      await dialog()
+        .getByRole("button", { name: L.stop, exact: true })
+        .waitFor();
+      assert.equal((await params()).voiceSelection, undefined);
+      await dialog().getByRole("button", { name: L.stop, exact: true }).click();
+      const previewRow = dialog()
+        .locator(".cw-voice-entry")
+        .filter({
+          has: page.getByRole("button", { name: "Sample voice", exact: true }),
+        });
+      await previewRow.click({ position: { x: 8, y: 8 } });
+      assert.equal((await params()).voiceSelection, undefined);
+      await previewRow.hover();
+      await dialog()
+        .getByRole("button", { name: L.favorite, exact: true })
+        .click();
+      await page.screenshot({
+        path: `${output}/${locale}-all-voices.png`,
+        fullPage: true,
+      });
+      await dialog()
+        .getByRole("tab", { name: L.favorites, exact: true })
+        .click();
+      await dialog().getByRole("button", { name: "Sample voice", exact: true }).waitFor();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: "Sample voice", exact: true })
+          .count(),
+        1,
+      );
+      await page.keyboard.press("Escape");
+      assert.equal(await dialog().count(), 0);
+      await open();
+      await dialog().getByRole("tab", { name: L.all, exact: true }).focus();
+      await page.keyboard.press("ArrowRight");
+      assert.equal(
+        await dialog()
+          .getByRole("tab", { name: L.mine, exact: true })
+          .getAttribute("aria-selected"),
+        "true",
+      );
+      await page.getByRole("textbox", { name: L.prompt, exact: true }).click();
+      assert.equal(await dialog().count(), 0);
+      await open();
+      await dialog().getByRole("tab", { name: L.mine, exact: true }).click();
+      await dialog()
+        .getByRole("button", { name: L.create, exact: true })
+        .click();
+      const createdName = `Narrator-${locale}`;
+      const vllmVoiceId = createdName.toLowerCase();
+      await dialog()
+        .getByLabel(L.recording, { exact: true })
+        .setInputFiles({
+          name: "broken.wav",
+          mimeType: "audio/wav",
+          buffer: Buffer.from("not an audio file"),
+        });
+      await dialog().getByRole("alert").waitFor();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: L.create, exact: true })
+          .isDisabled(),
+        true,
+      );
+      await dialog().getByLabel(L.name, { exact: true }).fill(createdName);
+      const consent = dialog().getByRole("textbox", {
+        name: L.consent,
+        exact: true,
+      });
+      assert.equal(await consent.getAttribute("required"), "");
+      const recording = dialog().getByLabel(L.recording, { exact: true });
+      await recording.setInputFiles({
+        name: "recording.webm",
+        mimeType: "audio/webm",
+        buffer: validWebm,
+      });
+      await dialog().getByText(/recording\.webm .* 2\.0 /).waitFor();
+      assert.ok(
+        await dialog().getByRole("button", { name: L.create, exact: true }).isDisabled(),
+      );
+      await consent.fill("consent-fixture-01");
+      await recording.setInputFiles({
+        name: "too-long.webm",
+        mimeType: "audio/webm",
+        buffer: longWebm,
+      });
+      await dialog().getByText(/too-long\.webm .* 31\.0 /).waitFor();
+      await dialog().getByRole("alert").waitFor();
+      assert.ok(await dialog().getByRole("button", { name: L.create, exact: true }).isDisabled());
+      await recording.setInputFiles({
+        name: "recording.webm",
+        mimeType: "audio/webm",
+        buffer: validWebm,
+      });
+      await dialog()
+        .getByRole("button", { name: L.create, exact: true })
+        .click();
+      await until(
+        async () => (await params())?.voiceSelection?.voiceId === vllmVoiceId,
+      );
+      await until(async () => (await dialog().count()) === 0);
+      await selectModel(drama);
+      assert.equal((await params()).voiceSelection, undefined);
+      assert.equal(
+        await page
+          .getByRole("button", { name: L.generate, exact: true })
+          .isDisabled(),
+        true,
+      );
+      await open();
+      await dialog()
+        .getByRole("button", { name: createdName, exact: true })
+        .waitFor();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: createdName, exact: true })
+          .isDisabled(),
+        true,
+      );
+      await dialog()
+        .getByRole("button", { name: L.create, exact: true })
+        .click();
+      assert.equal(
+        await dialog()
+          .getByLabel(L.transcript, { exact: true })
+          .getAttribute("required"),
+        "",
+      );
+      await page.keyboard.press("Escape");
+      await open();
+      await dialog()
+        .getByRole("button", { name: "Sample voice", exact: true })
+        .click();
+      await until(async () => (await params()).voice === "sample");
+      await selectModel(nano);
+      assert.equal((await params()).voiceSelection.voiceId, "sample");
+      await open();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: "default", exact: true })
+          .isDisabled(),
+        true,
+      );
+      await page.keyboard.press("Escape");
+      await page.getByRole("button", { name: L.generate, exact: true }).click();
+      await until(async () => (await state()).jobs[0]?.status === "succeeded");
+      assert.equal(
+        (await state()).jobs[0].inputSnapshot.spec.parameters.voiceSelection
+          .voiceId,
+        "sample",
+      );
+      await page.reload({ waitUntil: "domcontentloaded", timeout: reopenTimeout });
+      await waitForSaved(page, L.saved);
+      await page.locator(".react-flow__node").first().click();
+      assert.match(
+        await page
+          .getByRole("button", { name: L.library, exact: true })
+          .innerText(),
+        /Sample voice/,
+      );
+      await open();
+      await dialog()
+        .getByRole("tab", { name: L.favorites, exact: true })
+        .click();
+      await dialog().getByRole("button", { name: "Sample voice", exact: true }).waitFor();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: "Sample voice", exact: true })
+          .count(),
+        1,
+      );
+      await page.screenshot({
+        path: `${output}/${locale}-favorites.png`,
+        fullPage: true,
+      });
+      await page.keyboard.press("Escape");
+      await selectModel(other);
+      assert.equal((await params()).voiceSelection, undefined);
+      await open();
+      await dialog()
+        .getByRole("tab", { name: L.favorites, exact: true })
+        .click();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: "Sample voice", exact: true })
+          .count(),
+        0,
+      );
+      await page.keyboard.press("Escape");
+      await open();
+      await dialog().getByRole("tab", { name: L.mine, exact: true }).click();
+      await dialog().locator(".cw-voice-empty").waitFor();
+      assert.equal(await dialog().locator(".cw-voice-empty").count(), 1);
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: L.create, exact: true })
+          .count(),
+        1,
+      );
+      await page.keyboard.press("Escape");
+      await selectModel(normal);
+      await open();
+      await dialog().getByRole("button", { name: "Sample voice", exact: true }).click();
+      await until(async () => (await params()).voiceSelection?.voiceId === "sample");
+      await open();
+      await assertSelectedVoice("Sample voice");
+      await dialog()
+        .getByRole("button", { name: createdName, exact: true })
+        .click();
+      await until(async () => (await params()).voice === vllmVoiceId);
+      await open();
+      await assertSelectedVoice(createdName);
+      await dialog().getByRole("tab", { name: L.mine, exact: true }).click();
+      const entry = dialog()
+        .locator(".cw-voice-entry")
+        .filter({
+          has: page.getByRole("button", { name: createdName, exact: true }),
+        });
+      let failDelete = true;
+      await page.route("**/api/voices/*?**", async (route) => {
+        if (route.request().method() !== "DELETE" || !failDelete)
+          return route.continue();
+        failDelete = false;
+        return route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: "Fixture delete unavailable",
+            code: "voice_provider_error",
+          }),
+        });
+      });
+      await entry.locator("summary").click();
+      await entry.getByRole("button", { name: L.delete, exact: true }).click();
+      await dialog()
+        .getByRole("alertdialog")
+        .getByRole("button", { name: L.delete, exact: true })
+        .click();
+      await dialog().getByRole("alert").waitFor();
+      assert.equal(await entry.count(), 1);
+      await dialog()
+        .getByRole("alertdialog")
+        .getByRole("button", { name: L.delete, exact: true })
+        .click();
+      await until(async () => (await entry.count()) === 0);
+      assert.equal(
+        (await params()).voiceSelection.voiceId,
+        vllmVoiceId,
+        "Deleting must not silently fall back to default",
+      );
+      await page.keyboard.press("Escape");
+      await selectModel(cloud);
+      await open();
+      const cloudName = dialog().getByRole("button", { name: "Cloud voice", exact: true });
+      const cloudRow = dialog().locator(".cw-voice-entry").filter({
+        has: page.getByRole("button", { name: "Cloud voice", exact: true }),
+      });
+      for (const target of ["icon", "padding", "name", "keyboard"]) {
+        if (target !== "icon") {
+          await selectModel(normal);
+          await selectModel(cloud);
+          await open();
+        }
+        await cloudName.waitFor();
+        assert.equal((await params()).voiceSelection, undefined);
+        if (target === "icon") {
+          const circle = await cloudRow.locator(".cw-voice-circle").boundingBox();
+          assert.ok(circle);
+          await page.mouse.click(circle.x + circle.width / 2, circle.y + circle.height / 2);
+        } else if (target === "padding") {
+          await cloudRow.hover();
+          const favorite = cloudRow.locator(".cw-voice-favorite");
+          await favorite.click();
+          assert.equal(await favorite.getAttribute("aria-pressed"), "true");
+          await favorite.click();
+          await cloudRow.locator("summary").click();
+          assert.ok(await cloudRow.locator("details[open] button").isVisible());
+          await cloudRow.locator("summary").click();
+          assert.equal((await params()).voiceSelection, undefined);
+          await cloudRow.click({ position: { x: 8, y: 8 } });
+        } else if (target === "name") {
+          await cloudName.click();
+        } else {
+          await dialog().getByRole("button", { name: L.create, exact: true }).focus();
+          await page.keyboard.press("Tab");
+          assert.ok(await cloudName.evaluate(el => el === document.activeElement));
+          assert.equal(await cloudName.getAttribute("title"), L.selectableWithoutPreview);
+          assert.equal(await cloudRow.getByRole("img").count(), 0);
+          await page.screenshot({ path: `${output}/${locale}-select-without-preview.png`, fullPage: true });
+          await page.keyboard.press("Enter");
+        }
+        assert.equal(await dialog().count(), 0, `${target} must select and close the library`);
+        const stored = await until(async () => {
+          const current = await params();
+          return current.voiceSelection?.voiceId === "cloud-built-in" && current;
+        });
+        assert.equal(stored.voice, "cloud-built-in");
+        assert.equal(stored.voiceSelection.name, "Cloud voice");
+        assert.equal(stored.voiceSelection.connectionId, cloud.inputRules.voiceLibrary.connectionId);
+      }
+      await open();
+      await dialog()
+        .getByRole("button", { name: L.create, exact: true })
+        .click();
+      assert.equal(
+        await dialog().getByLabel(L.consent, { exact: true }).count(),
+        0,
+      );
+      assert.equal(await dialog().getByRole("textbox").count(), 1);
+      await dialog()
+        .getByLabel(L.recording, { exact: true })
+        .setInputFiles({
+          name: "recording.wav",
+          mimeType: "audio/wav",
+          buffer: wav,
+        });
+      await dialog().getByLabel(L.name, { exact: true }).fill(createdName);
+      await until(() =>
+        dialog().getByRole("button", { name: L.create, exact: true }).isEnabled(),
+      );
+      await page.screenshot({
+        path: `${output}/${locale}-create.png`,
+        fullPage: true,
+      });
+      const [createdResponse] = await Promise.all([
+        page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname === "/api/voices" &&
+            response.request().method() === "POST",
+        ),
+        dialog().getByRole("button", { name: L.create, exact: true }).click(),
+      ]);
+      assert.ok(createdResponse.ok());
+      const cloudVoice = await createdResponse.json();
+      assert.equal(cloudVoice.voiceId, `cloud-${createdName}`);
+      assert.equal(
+        cloudVoice.connectionId,
+        cloud.inputRules.voiceLibrary.connectionId,
+      );
+      await until(async () => (await params()).voice === cloudVoice.voiceId);
+      await open();
+      const nextPage = dialog().getByRole("button", {
+        name: L.nextPage,
+        exact: true,
+      });
+      const previousPage = dialog().getByRole("button", {
+        name: L.previousPage,
+        exact: true,
+      });
+      const builtin = dialog().getByRole("button", {
+        name: "Cloud voice",
+        exact: true,
+      });
+      const uploaded = dialog().getByRole("button", {
+        name: createdName,
+        exact: true,
+      });
+      await builtin.waitFor();
+      assert.equal(await previousPage.isDisabled(), true);
+      assert.equal(await uploaded.count(), 0);
+      assert.equal(
+        await dialog().getByText(L.selectionMissing, { exact: true }).count(),
+        0,
+      );
+      const continuation = (url) =>
+        url.pathname === "/api/voices" &&
+        url.searchParams.get("modelConfigId") === cloud.id &&
+        url.searchParams.has("after");
+      await page.route(continuation, (route) =>
+        route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            detail: "Fixture next page unavailable",
+            code: "voice_provider_error",
+          }),
+        }),
+      );
+      await nextPage.click();
+      await dialog().getByRole("alert").waitFor();
+      assert.ok(await builtin.isVisible());
+      await page.unroute(continuation);
+      const [response] = await Promise.all([
+        page.waitForResponse(
+          (response) => continuation(new URL(response.url())) && response.ok(),
+        ),
+        dialog().getByRole("button", { name: L.retry, exact: true }).click(),
+      ]);
+      const query = new URL(response.url()).searchParams;
+      assert.equal(query.get("pageSize"), "150");
+      assert.equal(query.get("connectionId"), cloudVoice.connectionId);
+      await uploaded.waitFor();
+      assert.equal(await nextPage.isDisabled(), true);
+      assert.equal(await builtin.count(), 0);
+      const uploadedRow = dialog()
+        .locator(".cw-voice-entry")
+        .filter({
+          has: page.getByRole("button", { name: createdName, exact: true }),
+        });
+      await uploadedRow.hover();
+      await uploadedRow.locator(".cw-voice-favorite").click();
+      await dialog()
+        .getByRole("tab", { name: L.favorites, exact: true })
+        .click();
+      await uploaded.waitFor();
+      assert.equal(await builtin.count(), 0);
+      await dialog().getByRole("tab", { name: L.all, exact: true }).click();
+      await builtin.waitFor();
+      assert.equal(await previousPage.isDisabled(), true);
+      await nextPage.click();
+      await uploaded.waitFor();
+      assert.equal(
+        await dialog()
+          .getByRole("button", { name: L.delete, exact: true })
+          .count(),
+        0,
+      );
+      await page.setViewportSize({ width: 560, height: 850 });
+      assert.equal(
+        await dialog()
+          .locator(".cw-voice-grid")
+          .evaluate(
+            (el) => getComputedStyle(el).gridTemplateColumns.split(" ").length,
+          ),
+        2,
+      );
+      await page.screenshot({
+        path: `${output}/${locale}-narrow.png`,
+        fullPage: true,
+      });
+      await page.keyboard.press("Escape");
+      await page.setViewportSize({ width: 1500, height: 1000 });
+      const previousJobs = (await state()).jobs.map((job) => job.id);
+      const player = page.locator(".cw-audio-preview audio");
+      const previousSrc = await player.evaluate((audio) => audio.src);
+      await page.getByRole("button", { name: L.generate, exact: true }).click();
+      const job = await until(async () =>
+        (await state()).jobs.find(
+          (job) => !previousJobs.includes(job.id) && job.status === "succeeded",
+        ),
+      );
+      const { model, spec } = job.inputSnapshot;
+      assert.equal(model.modelConfigId, cloud.id);
+      assert.equal(spec.parameters.voice, cloudVoice.voiceId);
+      assert.equal(spec.parameters.voiceSelection.voiceId, cloudVoice.voiceId);
+      assert.equal(
+        spec.parameters.voiceSelection.connectionId,
+        cloudVoice.connectionId,
+      );
+      const calls = (await call("/api/creation-test-health")).calls;
+      assert.deepEqual(
+        calls
+          .filter((call) => call.id === job.id)
+          .map((call) => call.parameters.voice),
+        [cloudVoice.voiceId],
+      );
+      const snapshot = await state();
+      const result = snapshot.results.find((result) => result.jobId === job.id);
+      assert.equal(snapshot.generationSpecs[0].currentResultId, result.id);
+      const asset = snapshot.assets.find(
+        (asset) => asset.id === result.asset.assetId,
+      );
+      assert.equal(asset.kind, "audio");
+      assert.ok(asset.metadata.durationSeconds > 0);
+      await page.waitForFunction((previous) => {
+        const audio = document.querySelector(".cw-audio-preview audio");
+        return audio?.currentSrc && audio.currentSrc !== previous;
+      }, previousSrc);
+      await player.evaluate((audio) => audio.play());
+      await page.waitForFunction(
+        () => document.querySelector(".cw-audio-preview audio")?.ended,
+      );
+      assert.ok(
+        await player.evaluate(
+          (audio) =>
+            audio.currentTime > 0 && audio.duration > 0 && audio.error === null,
+        ),
+      );
+      await page.screenshot({
+        path: `${output}/${locale}-moss-played.png`,
+        fullPage: true,
+      });
+
+      const assetPath = `/api/creation/projects/${id}/assets/${asset.id}/content`;
+      if (reopenDelay) {
+        await page.route((url) => url.pathname === assetPath, async (route) => {
+          await new Promise((resolve) => setTimeout(resolve, reopenDelay));
+          await route.continue();
+        });
+      }
+      const reopenedAudio = await reopenAudio(page, assetPath, L.saved);
+      assert.ok(
+        reopenedAudio.ok(),
+        `Reopened audio GET ${assetPath}: HTTP ${reopenedAudio.status()}`,
+      );
+      assert.match(reopenedAudio.headers()["content-type"], /^audio\//);
+      await page.locator(".react-flow__node").first().click();
+      assert.ok(
+        (
+          await page
+            .getByRole("button", { name: L.library, exact: true })
+            .innerText()
+        ).includes(createdName),
+      );
+      await player.waitFor();
+      await page.waitForFunction(() => {
+        const audio = document.querySelector(".cw-audio-preview audio");
+        return audio?.currentSrc && audio.readyState > 0 && audio.error === null;
+      });
+      const reopenedMedia = await player.evaluate(async (audio) => {
+        const response = await fetch(audio.currentSrc);
+        const blob = await response.blob();
+        const bytes = await blob.arrayBuffer();
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        const hex = Array.from(new Uint8Array(digest), (value) =>
+          value.toString(16).padStart(2, "0")).join("");
+        return {
+          sourcePath: new URL(window.__voiceMediaSources.get(audio.currentSrc)).pathname,
+          mimeType: blob.type, size: bytes.byteLength, fingerprint: `sha256:${hex}`,
+        };
+      });
+      assert.equal(reopenedMedia.sourcePath, assetPath);
+      assert.match(reopenedMedia.mimeType, /^audio\//);
+      assert.equal(reopenedMedia.size, asset.metadata.size);
+      assert.equal(reopenedMedia.fingerprint, asset.fingerprint);
+      await player.evaluate((audio) => audio.play());
+      await page.waitForFunction(
+        () => document.querySelector(".cw-audio-preview audio")?.ended,
+      );
+      assert.ok(await player.evaluate((audio) =>
+        audio.currentTime > 0 && audio.duration > 0 && audio.error === null));
+      const reopened = await state();
+      assert.deepEqual(
+        reopened.jobs.map((j) => j.id).sort(),
+        [...previousJobs, job.id].sort(),
+      );
+      assert.equal(reopened.generationSpecs[0].currentResultId, result.id);
+      assert.equal(
+        reopened.results.find((r) => r.id === result.id).asset.assetId,
+        asset.id,
+      );
+      assert.deepEqual(
+        reopened.generationSpecs[0].parameters.voiceSelection,
+        spec.parameters.voiceSelection,
+      );
+      assert.equal(
+        (await call("/api/creation-test-health")).calls.length,
+        calls.length,
+      );
+      await verifyPaginatedSearch({ dialog, L, open, page, params, selectModel });
+
+      await page.getByRole("button", { name: L.settings, exact: true }).click();
+      await page.getByRole("button", { name: L.models, exact: true }).click();
+      await page.locator(".cw-model-setup-row")
+        .filter({ has: page.locator("strong", { hasText: new RegExp(`^${L.audioOverview}$`) }) })
+        .getByRole("button").click();
+      const service = page.locator(".cw-model-service").filter({ hasText: "https://api.minimax.cn/v1" });
+      if (await service.count()) {
+        await service.getByRole("button", { name: L.manage, exact: true }).click();
+        assert.equal(await page.getByLabel("API Key", { exact: true }).inputValue(), "");
+      } else {
+        await page.getByRole("button", { name: L.addService, exact: true }).click();
+        await page.getByRole("combobox", { name: L.provider, exact: true }).click();
+        await page.getByRole("option", { name: L.speech, exact: true }).click();
+        await page.getByLabel("API Key", { exact: true }).fill("minimax-browser-fixture-only");
+      }
+      assert.equal(await page.getByRole("combobox", { name: L.provider, exact: true }).innerText(), L.speech);
+      assert.equal(await page.getByLabel(L.url, { exact: true }).inputValue(), "https://api.minimax.cn/v1");
+      for (const model of ["speech-2.8-hd", "speech-2.8-turbo"])
+        assert.equal(await page.getByRole("checkbox", { name: model, exact: true }).isChecked(), true);
+      for (const logo of await page.locator('.cw-model-option img[title="MiniMax"]').all()) {
+        await logo.evaluate(element => element.decode());
+        assert.ok(await logo.evaluate(element => element.naturalWidth > 0));
+      }
+      assert.equal(await page.locator('.cw-model-option img[title="MiniMax"]').count(), 2);
+      await page.screenshot({ path: `${output}/${locale}-minimax-provider.png`, fullPage: true });
+      await page.getByRole("button", { name: L.addModel, exact: true }).click();
+      const manualModel = page.locator(".cw-model-manual input");
+      await manualModel.fill("speech-2.8-unknown");
+      await manualModel.press("Enter");
+      await page.getByRole("button", { name: L.saveService, exact: true }).click();
+      await page.getByRole("alert").filter({ hasText: L.unsupportedModel }).waitFor();
+      await page.screenshot({ path: `${output}/${locale}-minimax-unsupported.png`, fullPage: true });
+      await page.getByRole("checkbox", { name: "speech-2.8-unknown", exact: true }).uncheck();
+      await page.getByRole("button", { name: L.saveService, exact: true }).click();
+      await page.getByRole("button", { name: L.addService, exact: true }).waitFor();
+      const minimax = (await call("/api/model-configs")).filter(model => model.inputRules.profile === "minimax-speech");
+      assert.equal(minimax.length, 2);
+      assert.equal(new Set(minimax.map(model => model.inputRules.voiceLibrary.connectionId)).size, 1);
+      assert.ok(!JSON.stringify(minimax).includes("minimax-browser-fixture-only"));
+      await page.getByRole("button", { name: L.closeSettings, exact: true }).click();
+      await selectModel(minimax[0]);
+      assert.equal((await params()).voiceSelection, undefined);
+      assert.equal(await page.getByRole("button", { name: L.generate, exact: true }).isDisabled(), true);
+      await open();
+      await dialog().getByRole("button", { name: "Santa Claus", exact: true }).waitFor();
+      assert.equal(await dialog().getByRole("button", { name: L.create, exact: true }).isDisabled(), true);
+      assert.equal(await dialog().getByRole("button", { name: L.delete, exact: true }).count(), 0);
+      await page.screenshot({ path: `${output}/${locale}-minimax-voices.png`, fullPage: true });
+      await dialog().getByRole("button", { name: "Santa Claus", exact: true }).click();
+      await until(async () => (await params()).voice === "Santa_Claus ");
+      await selectModel(minimax[1]);
+      assert.equal((await params()).voiceSelection.voiceId, "Santa_Claus ");
+      await page.getByRole("textbox", { name: L.prompt, exact: true }).fill("🎙".repeat(3000));
+      assert.equal(await page.getByRole("button", { name: L.generate, exact: true }).isDisabled(), false);
+      await page.getByRole("textbox", { name: L.prompt, exact: true }).fill("🎙".repeat(3001));
+      assert.equal(await page.getByRole("button", { name: L.generate, exact: true }).isDisabled(), true);
+      await page.getByRole("button", { name: L.generate, exact: true }).hover();
+      await page.getByRole("tooltip").filter({ hasText: L.textLimit }).waitFor();
+      await page.screenshot({ path: `${output}/${locale}-minimax-text-limit.png`, fullPage: true });
+      await page.getByRole("textbox", { name: L.prompt, exact: true }).fill("Hello from MiniMax speech.");
+      const beforeMinimax = (await state()).jobs.map(job => job.id);
+      await page.getByRole("button", { name: L.generate, exact: true }).click();
+      const speechJob = await until(async () => (await state()).jobs.find(job =>
+        !beforeMinimax.includes(job.id) && job.status === "succeeded"));
+      assert.equal(speechJob.inputSnapshot.spec.parameters.voiceSelection.voiceId, "Santa_Claus ");
+      assert.equal(speechJob.execution.voice, "Santa_Claus ");
+      const speechAsset = (await state()).assets.find(asset => asset.id === speechJob.asset.assetId);
+      const speechPath = `/api/creation/projects/${id}/assets/${speechAsset.id}/content`;
+      assert.ok((await reopenAudio(page, speechPath, L.saved)).ok());
+      await page.locator(".react-flow__node").first().click();
+      assert.match(await page.getByRole("button", { name: L.library, exact: true }).innerText(), /Santa Claus/);
+      await page.waitForFunction(() => document.querySelector(".cw-audio-preview audio")?.readyState > 0);
+      await player.evaluate(audio => audio.play());
+      await page.waitForFunction(() => document.querySelector(".cw-audio-preview audio")?.ended);
+      assert.ok(await player.evaluate(audio => audio.currentTime > 0 && audio.error === null));
+      await page.screenshot({ path: `${output}/${locale}-minimax-played.png`, fullPage: true });
+    } catch (error) {
+      await page
+        .screenshot({ path: `${output}/${locale}-failure.png`, fullPage: true })
+        .catch(() => {});
+      throw error;
+    } finally {
+      await page.close();
+    }
+  }
+  assert.deepEqual(errors, []);
+  console.log(
+    JSON.stringify({
+      passed: true,
+      locales: Object.keys(copy),
+      evidence: output,
+      provider: "mocked HTTP; real upload probing, storage and WAV generation",
+    }),
+  );
+} finally {
+  await browser.close();
+}

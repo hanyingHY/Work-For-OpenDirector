@@ -1,0 +1,53 @@
+# CI 失败模式
+# CI failures
+
+## Release Python suite (baseline 42263495)
+
+Re-checked the eight failures reported for the release Python suite on upstream main
+(`efc9dbe9`) with the locked dependencies. All eight now pass; the development between
+the baseline and main resolved them, so no single targeted fix is responsible. The
+verification ran locally on Python 3.12.3 rather than ubuntu-22.04 CI, so a maintainer
+should confirm on a CI run before closing.
+
+| Case | Baseline failure | Status |
+| --- | --- | --- |
+| `tests/test_agent_gateway.py::test_batch_hide_is_atomic_and_replayable` | description length 161 exceeds 120 | passes |
+| `tests/test_cli.py::test_all_cli_business_commands_have_help` | `--file` / `--model` absent from rendered output | passes |
+| `tests/test_cli.py::test_parser_error_shows_specific_command_help` | `--file` / `--model` absent from rendered output | passes |
+| `tests/test_creation_generation_service.py::test_hidden_source_generation_frozen_history_restart_and_idempotent_command` | `IndexError: tuple index out of range` | passes |
+| `tests/test_creation_storage.py::test_byte_verified_cache_detects_rewrites_with_unchanged_file_signature[head]` | expected `ProjectError` was not raised | passes |
+| `tests/test_creation_storage.py::test_byte_verified_cache_detects_rewrites_with_unchanged_file_signature[ancestor]` | expected `ProjectError` was not raised | passes |
+| `tests/test_runtime_readiness.py::test_runtime_catalog_can_skip_probes_and_check_one_harness` | `not_installed` instead of `checking` | passes |
+| `tests/test_self_hosted.py::test_video_reference_acceptance_follows_model_rules` | expected `ProjectError` was not raised | passes |
+
+The extra tool-lifecycle assertion from PR #158 run 42224427798 did not reproduce in
+three consecutive local runs and is recorded as a separate follow-up.
+
+The OpenCode hang tracked as #162 is unrelated and was not verified here.
+
+本文件记录 Release checks 与 nightly 中已知的环境或时序敏感失败模式，以及区分偶发失败与真实回归的判别方法。修复一个模式后应更新本文件；出现新模式时补入新条目。已知时序敏感用例的清单见 [`scripts/nightly/flaky-watchlist.txt`](../../scripts/nightly/flaky-watchlist.txt)，nightly 的 flake triage lane 会按它输出波动率。
+
+## 判别偶发失败与真实回归
+
+- 先确认失败是否可复现于同一 SHA：对比该 commit 在同一分支上的近期运行结果；一个失败随后在同 SHA 上转绿，属于偶发信号，不属于该 PR 的回归。
+- Python 套件失败时查看 nightly flake triage 的分类：`flaky`（失败子集重跑通过）与 `fail`（重跑仍失败）含义不同；watchlist 用例的 3 次连跑结果给出波动率。
+- Release checks 先运行静态门禁，再并行运行 Python、前端/打包和三个浏览器旅程；测试线失败不取消其余测试线。最终 checks 汇总必须全部成功，只有明确关闭的 static 可 skipped。静态失败造成的下游 skipped 不是通过，判别时同时查看 static、各测试线和最终汇总。
+- Release checks runs the static gate first, followed by independent Python, frontend/package and three browser journeys. The final checks aggregate rejects failures, cancellations and unexpected skips; only an explicitly disabled static lane may be skipped.
+
+## 已知时序敏感模式（2026-11 观测）
+
+| 模式 | 涉及用例 | 现象 |
+| --- | --- | --- |
+| CLI 帮助文本受 ANSI 与终端宽度影响 | `test_cli.py::test_all_cli_business_commands_have_help`、`test_cli.py::test_parser_error_shows_specific_command_help` | 着色帮助输出导致断言不稳定 |
+| worker 调度时序竞争 | `test_tool_lifecycle.py::test_another_live_worker_is_not_marked_interrupted`（`running` 与 `queued`）、`test_agent_gateway.py::test_batch_hide_is_atomic_and_replayable`（计数上限） | 并发 worker 状态翻转先于断言 |
+| 字节校验缓存重写探测 | `test_creation_storage.py::test_byte_verified_cache_detects_rewrites_with_unchanged_file_signature[head]`、`[ancestor]` | 文件签名不变时缓存行为受探测顺序影响 |
+| runtime readiness 探针状态 | `test_runtime_readiness.py::test_runtime_catalog_can_skip_probes_and_check_one_harness`（`not_installed` 与 `checking`） | 探针进行中状态被断言捕获 |
+| 生成服务重启历史 | `test_creation_generation_service.py::test_hidden_source_generation_frozen_history_restart_and_idempotent_command` | 重启路径上偶发 IndexError |
+| 视频参考验收规则 | `test_self_hosted.py::test_video_reference_acceptance_follows_model_rules` | 同一输入偶发不同判定 |
+
+以上用例已于 2026-11-07 登记 watchlist，由 nightly 观测波动率；修复后从 watchlist 与本表移除。
+
+## 历史注记
+
+- 2026-11-07 前，Release checks 为单 job 顺序执行：Python 套件失败会静默跳过后续的契约检查、生产构建、wheel 验证与浏览器阶段（#158 之前，run 42224427798 印证）。现各步骤独立运行，失败不再互相掩盖。
+- Release checks 现为可复用工作流 [`release-checks.yml`](../../.github/workflows/release-checks.yml)，由 [`ci.yml`](../../.github/workflows/ci.yml) 与 nightly 共用；修改检查内容时两处入口自动一致。
