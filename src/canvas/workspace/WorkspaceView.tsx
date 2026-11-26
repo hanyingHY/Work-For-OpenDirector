@@ -1,0 +1,3654 @@
+import type { EditingState } from "../../backend/editSession.ts";
+import type { EditSession } from "./EditSession.tsx";
+import { projectDisplayName } from "../projectDisplayName";
+import { persistCurrentDocument } from "../projectManagement";
+import { DesktopSidebar } from "./DesktopSidebar";
+import { Background, BackgroundVariant, MiniMap, SelectionMode, ViewportPortal } from "@xyflow/react";
+
+import "@xyflow/react/dist/style.css";
+import { Suspense, useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import type { AssistantModelSelection } from "../../backend/chat.ts";
+import { createNode, type CanvasNode } from "../model.ts";
+import { NodeVersionHistory } from "../NodeVersionHistory";
+
+import openDirectorLogoAnimation from "../../assets/open_director_logo_anim.gif";
+import { request as apiRequest, errorMessage, json as apiJson } from "../../backend/api.ts";
+import { creationClient, assetReference, objectVersion, visibleItems } from "../../backend/creationClient.ts";
+import { listReferenceAssets, type ReferenceMediaAsset } from "../../backend/referenceMedia.ts";
+import type { CanvasItem } from "../../contracts/generated.ts";
+
+import { previewImageSelection } from "../../backend/imageSelections";
+import { MediaPublication } from "../../backend/mediaPublication";
+import { CreationEditorSession } from "../../backend/creationEditorSession";
+import { captureEditorSource } from "../linkedResults";
+import { TimelinePackageImport, exportTimelinePackage as exportNativeTimelinePackage } from "../../backend/timelinePackages";
+import { readLocalResource } from "../timelineExport.ts";
+import { timelinePublication } from "../../backend/timelinePublication";
+import { acknowledgeToolPlacement, cancelToolTask } from "../../backend/tools.ts";
+import { createWorkspaceProject, listWorkspaceProjects, openWorkspaceProject, saveWorkspaceDocument, workspaceProjection } from "../../backend/workspace";
+import { studyImage } from "../assets";
+import { ExampleCanvasDialog } from "./example/ExampleCanvasDialog.tsx";
+import {
+  IMAGE_EXAMPLE_ID,
+  VIDEO_EXAMPLE_ID,
+  availableExamples,
+  loadExampleCatalog,
+  type ExampleEntry,
+} from "./example/exampleCatalog.ts";
+import { exampleFailureText, examplePercent } from "./example/exampleFailure.ts";
+import { useExampleImport } from "./example/useExampleImport.ts";
+
+import { AssistantPanel } from "../AssistantPanel";
+import { CanvasActionsContext } from "../CanvasActionsContext";
+import { CanvasConnectionLine, CanvasConnectionPreview, CanvasInteractionOverlay } from "../CanvasConnections";
+
+import { CanvasCreationMenu, CreationMenuContent } from "../CanvasCreationMenu";
+import { CanvasFlowSurface } from "../CanvasFlowSurface";
+
+import { CanvasIcon } from "../CanvasIcon";
+import { CanvasPlaybackProvider } from "../CanvasMediaPreview";
+import { CanvasNotifications } from "../CanvasNotifications";
+
+import { CanvasToolRail } from "../CanvasToolRail";
+import { canStartReference, connectedCreationKinds } from "../connectionPolicy";
+import { REFERENCE_PORT_ICON_SIZE, REFERENCE_PORT_SIZE, referencePortDirection, referencePortIcon } from "../connectionPorts";
+import { batchCreationKinds, SELECTION_PADDING, SELECTION_PORT_SIZE } from "../selectionReferences";
+
+import "../multi-selection.css";
+import "../windows-features.css";
+import { CreationRipples } from "../CreationRipples.tsx";
+import { CommandPalette, type PaletteCommand } from "../CommandPalette.tsx";
+import { DesktopHealthDialog } from "../DesktopHealthDialog.tsx";
+import { ReferenceMediaDialog } from "../ReferenceMediaDialog.tsx";
+import { StoryboardSheetDialog } from "../StoryboardSheetDialog.tsx";
+import { WorkflowTemplatesDialog } from "../WorkflowTemplatesDialog.tsx";
+import { buildStoryboardCanvasFragment } from "../storyboardSheet.ts";
+import {
+  WORKFLOW_TEMPLATES,
+  buildWorkflowTemplateFragment,
+} from "../workflowTemplates.ts";
+import { canvasDotGrid } from "../creationRipples.ts";
+import "../node-reference-ports.css";
+import "../control-theme.css";
+import { CreationAssetList } from "../CreationAssetList.tsx";
+import { CANVAS_CREATION_TOOLS } from "../creationTools";
+import { EditorModal } from "../EditorModal";
+import { GenerationHistoryPanel } from "../GenerationHistoryPanel";
+import { arrangeNodes } from "../geometry";
+
+import { ImageActionEditor, isImageActionTool } from "../ImageActionEditor";
+import { ImageEditor } from "../ImageEditor";
+import { AssetLibraryDialog } from "../library/AssetLibraryDialog";
+import "../library/library.css";
+import { SubjectImportDialog } from "../library/SubjectImportDialog";
+import { validateNodeActionSource } from "../linkedResults";
+
+import { LocalImageTools } from "../LocalImageTools";
+import { LocalMediaEditor } from "../LocalMediaEditor";
+import { canAddReference, MAX_ZOOM, MIN_ZOOM } from "../model";
+import { gridSplitImage } from "../nodeActionWorkflow";
+import { NodeComposer } from "../NodeComposer";
+import { pinnedPrecheckNodes } from "../workspaceInteraction.ts";
+
+import { NodeInfoButton } from "../NodeInfoButton";
+import { NodeSelectionToolbar } from "../NodeSelectionToolbar";
+import { TextNodeWindow } from "../TextNodeWindow";
+import { SelectionBarAnchor } from "../SelectionBarAnchor";
+import { NodeTaskPanel } from "../NodeTaskPanel";
+import { layoutGroup, orderNodesForCanvas, unstackSelection, type GroupLayout } from "../operations";
+
+import { ProjectSelector } from "../ProjectSelector";
+import "../settings.css";
+import { dismissModelSetup } from "../ModelSetup";
+
+import { WelcomeScreen } from "../WelcomeScreen";
+import { firstRunCapabilities } from "../firstRunModels";
+import { newNodeGenerationSettings } from "../modelResolution";
+import { SettingsDialog } from "../SettingsDialog";
+import { alignNodes, type Alignment } from "../snapping";
+import { StackEditor } from "../StackEditor";
+import { subjectImportSelection, subjectTargetIdentity } from "../subjectLibraryImport.ts";
+
+import { TextNodeComposer } from "../TextNodeComposer";
+import "../themes.css";
+import { TimelineEditor } from "../TimelineEditor";
+import { TimelineOutputShortcut, useTimelineOutput } from "../TimelineOutput";
+import { CANVAS_TOOLS, createCanvasToolTask, initialToolParameters } from "../toolCatalog";
+
+import { translateToolText } from "../toolText.ts";
+import { ToolEditor } from "../ToolEditor";
+import { TooltipButton } from "../TooltipButton";
+
+import { VideoActionEditor } from "../VideoActionEditor";
+import { captureVideoEndpoint, extractVideoAudio } from "../videoActionRuntime";
+import "../workspace.css";
+import "../desktop-chrome.css";
+import type { WorkspaceRuntime } from "./runtimeTypes.ts";
+import { DirectorStage, IconButton, helpShortcuts, nodeKindKeys, nodeTypes, edgeTypes, referenceSideKeys, incomingNodes } from "./workspaceChrome.tsx";
+import { AssetMedia } from "../useAssetMedia.tsx";
+
+
+export function WorkspaceView({ rt, editingState, editSession }: {
+  rt: WorkspaceRuntime;
+  editingState?: EditingState;
+  editSession: EditSession;
+}) {
+  const readOnly = editingState?.mode === "preview";
+  const editHandoffPending = editSession.working && !readOnly;
+  const assistantModel = useRef<{ projectId: string; selection: AssistantModelSelection | null }>(null);
+  const onAgentModel = useCallback((projectId: string, selection: AssistantModelSelection | null) => {
+    assistantModel.current = { projectId, selection };
+  }, []);
+  const timelineOutput = useTimelineOutput(rt.doc.id, rt.doc.nodes);
+  const runLayoutPending = useRef(false);
+  const {
+    actionMedia,
+    actionNode,
+    actions,
+    activeAction,
+    addLinkedOutputs,
+    addNode,
+    assetListAnchor,
+    assistantLayout,
+    assistantOpen,
+    assistantSelectionRequest,
+    backendCatalog,
+    backupLibrarySubject,
+    begin,
+    beginDrag,
+    businessHistory,
+    bypassSnapping,
+    cancelServiceRuns,
+    center,
+    change,
+    changeTool,
+    clipboard,
+    closeAction,
+    closeEditor,
+    command,
+    commitCanvasCommand,
+    commitEditorData,
+    composerElement,
+    composerExpanded,
+    composerIncoming,
+    composerNode,
+    submissionAssets,
+    composerRunning,
+    confirmSubjectImport,
+    connect,
+    connectionStarted,
+    contextItems,
+    copy,
+    cut,
+    deleteProject,
+    dismiss,
+    doc,
+    downloadNode,
+    downloadGroup,
+    runGroupWorkflow,
+    editProjectNameId,
+    editing,
+    editorMode,
+    editorOrigin,
+    editorOutputs,
+    editorSession,
+    editorSaving,
+    invalidateScheduledAutosave,
+    saveQueue,
+    setEditing,
+    end,
+    endDrag,
+    exportDocument,
+    fileInput,
+    fit,
+    flow,
+    flowSurface,
+    focusSelection,
+    generationReferenceControls,
+    group,
+    hand,
+    hasComposer,
+    hasToolbar,
+    help,
+    historyRef,
+    historyReplaying,
+    importActionResultFiles,
+    importActionResults,
+    importCanvasArchive,
+    importCanvasSource,
+    importDocument,
+    importFiles,
+    importInput,
+    importLibrarySubjects,
+    initializationError,
+    insertLibraryItems,
+    installDocument,
+    interacting,
+    jobs,
+    libraryOpen,
+    liveCanvas,
+    locale,
+    lockedIds,
+    marqueeClick,
+    maskTool,
+    mediaPublications,
+    menu,
+    menuButton,
+    minimap,
+    notifications,
+    notify,
+    onConnectEnd,
+    onNodesChange,
+    onWorkspaceKey,
+    openEditor,
+    openFilePicker,
+    openNodeAction,
+    pageVisible,
+    panel,
+    panning,
+    paste,
+    pendingBatchPreviews,
+    pendingConnection,
+    persist,
+    pointerGesture,
+    portMetrics,
+    prepareGeneration,
+    preview,
+    projectRenaming,
+    projected,
+    readJobs,
+    recoverServiceTask,
+    ready,
+    referenceEdges,
+    referencePreviews,
+    referenceTarget,
+    references,
+    removeSelected,
+    renameCurrentProject,
+    renameProject,
+    replayHistory,
+    resources,
+    resultInput,
+    revealResults,
+    root,
+    runQuickAction,
+    runToolTask,
+    saveActionDraft,
+    saveStatus,
+    saveStatusText,
+    selectAndFocus,
+    selected,
+    selectedEdges,
+    selectedNodes,
+    selectedRef,
+    selectionAtPointerDown,
+    selectionGeometry,
+    selectionNodes,
+    selectionPresentation,
+    selectionReferenceReason,
+    selectionSource,
+    setActionMedia,
+    setActionSession,
+    setAssistantModels,
+    setAssistantOpen,
+    setAssistantSelectionRequest,
+    setDismissedComposer,
+    setEditProjectNameId,
+    setExpandedComposerId,
+    setHelp,
+    setHistory,
+    setHoveredNode,
+    setInteracting,
+    setJobs,
+    setLibraryOpen,
+    setLocale,
+    setMaskTool,
+    setMenu,
+    setMinimap,
+    setPanel,
+    setPreview,
+    setSaveStatus,
+    setSelected,
+    setSelectedEdges,
+    setSettingsCategory,
+    setSettingsModelKind,
+    setSettingsOpen,
+    setShowEdges,
+    setSubjectImport,
+    setTextEditingId,
+    setTextWindowId,
+    setVersionHistory,
+    setWelcomeOpen,
+    setZoom,
+    setZoomMenu,
+    settingsCategory,
+    settingsModelKind,
+    settingsOpen,
+    showAssistant,
+    showEdges,
+    single,
+    snapshotModel,
+    spacePressed,
+    stack,
+    subjectImport,
+    subjectLibraryBusy,
+    switchDocument,
+    switching,
+    switchPending,
+    syncServiceResults,
+    t,
+    textWindowNode,
+    theme,
+    togglePanel,
+    toolCatalog,
+    toolRevision,
+    toolbarElement,
+    ungroup,
+    uploadTarget,
+    versionHistory,
+    viewportMoving,
+    welcomeOpen,
+    zoom,
+    zoomMenu,
+  } = rt;
+
+
+  /**
+   * Example canvases: one cached catalog feeds both the empty-state buttons and
+   * the picker in the project menu.
+   */
+  const [exampleEntries, setExampleEntries] = useState<ExampleEntry[] | null>(null);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [referenceDialogOpen, setReferenceDialogOpen] = useState(false);
+  const [storyboardOpen, setStoryboardOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [healthOpen, setHealthOpen] = useState(false);
+  const [referenceAssets, setReferenceAssets] = useState<ReferenceMediaAsset[]>([]);
+  const insertFragment = rt.insertFragment;
+
+  const refreshReferenceAssets = useCallback(() => {
+    if (!ready || !doc.id) return;
+    void listReferenceAssets(doc.id)
+      .then((items) => setReferenceAssets(items))
+      .catch(() => {});
+  }, [ready, doc.id]);
+
+  useEffect(() => {
+    refreshReferenceAssets();
+  }, [refreshReferenceAssets, doc.nodes.length]);
+
+  // Global Ctrl+K / Cmd+K Director Command Palette shortcut
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // Windows screenshot / OS clipboard image paste directly onto the canvas (Issue #474)
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      if (readOnly) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      const items = event.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of Array.from(items)) {
+        if (item.kind === "file" && item.type.startsWith("image/")) {
+          const file = item.getAsFile();
+          if (file) files.push(file);
+        }
+      }
+      if (files.length) {
+        event.preventDefault();
+        void importFiles(files);
+        notify(t("canvas.clipboard.pastedScreenshot"));
+      }
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [readOnly, importFiles, notify, t]);
+
+  const placeReferencedAssetOnCanvas = useCallback(
+    async (refAsset: ReferenceMediaAsset) => {
+      const client = creationClient(doc.id);
+      await client.refresh();
+      const asset = client.snapshot.assets.find((a) => a.id === refAsset.assetId);
+      if (!asset) throw new Error(t("canvasNodes.assets.nodeChanged"));
+      const node = createNode(
+        asset.kind as "image" | "video" | "audio",
+        { x: 160 + (doc.nodes.length % 4) * 60, y: 120 + (doc.nodes.length % 3) * 50 },
+        { title: asset.name },
+      );
+      const item = {
+        id: node.id,
+        projectId: doc.id,
+        revision: 1,
+        kind: asset.kind,
+        title: asset.name,
+        position: node.position,
+        width: node.width,
+        height: node.height,
+        zIndex: 0,
+        locked: false,
+        visible: true,
+        parentId: null,
+        tags: [],
+        editors: [],
+        binding: { role: "material", objectRef: assetReference(asset) },
+      } as CanvasItem;
+      await client.command("canvas.show", { item });
+      await syncServiceResults();
+      refreshReferenceAssets();
+      setTimeout(() => fit(true), 80);
+    },
+    [doc.id, doc.nodes.length, syncServiceResults, refreshReferenceAssets, fit, t],
+  );
+
+  const referenceAlerts = referenceAssets.filter((r) => r.availability !== "online");
+
+  const paletteCommands: PaletteCommand[] = [
+    {
+      id: "storyboard",
+      group: "workflows",
+      label: t("canvas.palette.cmd.storyboard"),
+      keywords: "storyboard script matrix timeline",
+      onRun: () => setStoryboardOpen(true),
+    },
+    {
+      id: "templates",
+      group: "workflows",
+      label: t("canvas.palette.cmd.templates"),
+      keywords: "templates workflow film ad character beat",
+      onRun: () => setTemplatesOpen(true),
+    },
+    {
+      id: "reference",
+      group: "workflows",
+      label: t("canvas.palette.cmd.reference"),
+      keywords: "reference link local media zero copy relink",
+      onRun: () => setReferenceDialogOpen(true),
+    },
+    {
+      id: "fit",
+      group: "workflows",
+      label: t("canvas.palette.cmd.fit"),
+      keywords: "fit zoom viewport",
+      shortcut: "Shift+1",
+      onRun: () => fit(),
+    },
+    {
+      id: "agent-plan",
+      group: "agent",
+      label: t("canvas.palette.cmd.agentPlan"),
+      keywords: "agent assistant plan readonly",
+      onRun: () => {
+        showAssistant();
+        setTimeout(() => {
+          document.querySelector<HTMLButtonElement>('[data-testid="agent-mode-plan"]')?.click();
+        }, 120);
+      },
+    },
+    {
+      id: "agent-build",
+      group: "agent",
+      label: t("canvas.palette.cmd.agentBuild"),
+      keywords: "agent assistant build execute",
+      onRun: () => {
+        showAssistant();
+        setTimeout(() => {
+          document.querySelector<HTMLButtonElement>('[data-testid="agent-mode-build"]')?.click();
+        }, 120);
+      },
+    },
+    {
+      id: "health",
+      group: "desktop",
+      label: t("canvas.palette.cmd.health"),
+      keywords: "health desktop diagnostics ffmpeg python webcodecs",
+      onRun: () => setHealthOpen(true),
+    },
+    {
+      id: "toggle-locale",
+      group: "desktop",
+      label: t("canvas.palette.cmd.toggleLocale"),
+      keywords: "language locale chinese english",
+      onRun: () => setLocale(locale === "zh-CN" ? "en-US" : "zh-CN"),
+    },
+    {
+      id: "toggle-theme",
+      group: "desktop",
+      label: t("canvas.palette.cmd.toggleTheme"),
+      keywords: "theme dark light",
+      onRun: () => theme.setTheme(theme.theme === "dark" ? "light" : "dark"),
+    },
+    {
+      id: "check-updates",
+      group: "desktop",
+      label: t("canvas.palette.cmd.checkUpdates"),
+      keywords: "update version release",
+      onRun: () => setHealthOpen(true),
+    },
+    {
+      id: "copy-diagnostics",
+      group: "desktop",
+      label: t("canvas.palette.cmd.copyDiagnostics"),
+      keywords: "diagnostics support logs",
+      onRun: () => {
+        if (window.opendirectorDesktop?.copyDiagnostics) {
+          void window.opendirectorDesktop.copyDiagnostics().then(() => {
+            notify(t("canvas.health.diagCopied"));
+          });
+        } else {
+          setHealthOpen(true);
+        }
+      },
+    },
+  ];
+
+  useEffect(() => {
+    const subscribe = window.opendirectorDesktop?.onOpenTarget;
+    if (!subscribe) return;
+    return subscribe((target) => {
+      if (target?.kind === "project" && target.value) {
+        void listWorkspaceProjects().then(({ projects }) => {
+          const match = projects.find((project) => project.id === target.value);
+          if (match) {
+            void switchDocument(() => openWorkspaceProject(match));
+          }
+        });
+      }
+    });
+  }, [switchDocument]);
+  const [welcomeExampleId, setWelcomeExampleId] = useState<string | null>(null);
+  const [firstRunArriving, setFirstRunArriving] = useState(false);
+  const pendingFirstNodes = useRef<{ projectId: string; selection: string; nodes: CanvasNode[] } | null>(null);
+  const finishFirstRun = () => {
+    pendingFirstNodes.current = null;
+    dismissModelSetup();
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("setup") === "welcome") {
+      url.searchParams.delete("setup");
+      window.history.replaceState(window.history.state, "", url);
+    }
+    setFirstRunArriving(window.matchMedia("(prefers-reduced-motion: no-preference)").matches);
+    setWelcomeOpen(false);
+  };
+  const [exampleLoading, setExampleLoading] = useState(false);
+  const exampleCatalog = useRef<Promise<ExampleEntry[]> | null>(null);
+  const optimizedPrompts = useRef(new Map<string, string>());
+  const loadExamples = () =>
+    (exampleCatalog.current ??= loadExampleCatalog().then((result) =>
+      availableExamples(result.catalog),
+    ));
+  const openExamplePicker = async () => {
+    if (exampleLoading) return;
+    setExampleLoading(true);
+    try {
+      setExampleEntries(await loadExamples());
+    } finally {
+      setExampleLoading(false);
+    }
+  };
+  const welcomeExampleImport = useExampleImport({
+    importCanvas: async (archive) => {
+      const { switched } = await importCanvasArchive(archive);
+      if (!switched) throw new Error(t("canvas.workspace.error.importNotApplied"));
+      finishFirstRun();
+    },
+  });
+  const openWelcomeExample = async () => {
+    const openOfflineFallback = () => {
+      const template = WORKFLOW_TEMPLATES[0];
+      const fragment = buildWorkflowTemplateFragment(template, t);
+      insertFragment(fragment, 0);
+      finishFirstRun();
+      notify(
+        t("canvas.templates.applied", {
+          title: t(template.titleKey),
+          count: fragment.nodes.length,
+        }),
+      );
+    };
+    try {
+      const entries = await loadExamples();
+      const entry = entries.find((item) => item.id === VIDEO_EXAMPLE_ID) ?? entries[0];
+      if (!entry) {
+        openOfflineFallback();
+        return;
+      }
+      setWelcomeExampleId(entry.id);
+      const ok = await welcomeExampleImport.start(entry);
+      if (!ok) {
+        welcomeExampleImport.reset(entry.id);
+        openOfflineFallback();
+      }
+    } catch {
+      openOfflineFallback();
+    }
+  };
+  const exampleImport = useExampleImport({ importCanvas: importCanvasArchive });
+  const [exampleMissing, setExampleMissing] = useState(false);
+  const runExampleButton = async (id: string) => {
+    setExampleMissing(false);
+    exampleImport.reset(IMAGE_EXAMPLE_ID);
+    exampleImport.reset(VIDEO_EXAMPLE_ID);
+    const entry = (await loadExamples()).find((item) => item.id === id);
+    if (!entry) {
+      setExampleMissing(true);
+      return;
+    }
+    // A finished import switches the document, so the bar disappears with it.
+    if (await exampleImport.start(entry)) exampleImport.reset(entry.id);
+  };
+  const exampleButtonStatus =
+    exampleImport.statuses[IMAGE_EXAMPLE_ID] ??
+    exampleImport.statuses[VIDEO_EXAMPLE_ID];
+  const exampleBusy =
+    exampleButtonStatus?.phase === "downloading" ||
+    exampleButtonStatus?.phase === "importing";
+  const exampleProgress = exampleButtonStatus
+    ? examplePercent(exampleButtonStatus)
+    : null;
+
+
+  const outputState = timelineOutput.state;
+  const outputSource = outputState ? doc.nodes.find((node) => node.id === outputState.itemId) : undefined;
+  const existingOutput = outputState ? projected.nodes.find((node: { id: string }) => node.id === outputState.output.id) : undefined;
+  const outputSize = {
+    width: existingOutput?.width ?? 352,
+    height: existingOutput?.height ?? 198,
+  };
+  const pendingOutput = outputSource && outputState && outputState.phase !== "done"
+    ? {
+        id: outputState.output.id,
+        type: "video" as const,
+        position: outputState.output.position,
+        width: outputSize.width, height: outputSize.height,
+        // The injection is rebuilt on every render, so React Flow compares a new
+        // node object each time and resets `handleBounds` whenever `measured` is
+        // absent. The pending reference edge then has no path and disappears until
+        // the node is measured again, which a settled canvas never triggers.
+        measured: outputSize,
+        style: { width: outputSize.width, height: outputSize.height },
+        selectable: false, draggable: false, connectable: false, deletable: false, focusable: false,
+        data: {
+          kind: "video" as const, title: outputState.output.title,
+          timelineOutput: {
+            title: outputState.output.title, phase: outputState.phase,
+            progress: outputState.progress, error: outputState.error,
+            onCancel: timelineOutput.cancel,
+            onRetry: () => {
+              const source = doc.nodes.find((node) => node.id === outputState.itemId);
+              if (source) void timelineOutput.run(source, () => persist(doc, false));
+            },
+          },
+        },
+      }
+    : null;
+
+  useEffect(() => {
+    if (!outputSource || !outputState || outputState.phase === "done") return;
+    const output = createNode("video", outputState.output.position, { title: outputState.output.title });
+    output.id = outputState.output.id;
+    rt.revealCreatedNodes.current([output], doc.nodes.some((node) => node.id === output.id) ? doc.nodes : [...doc.nodes, output]);
+  }, [outputState?.output.id]);
+
+  const [workflowGroups, setWorkflowGroups] = useState<ReadonlySet<string>>(() => new Set());
+  const runWorkflow = (groupId: string) => {
+    if (workflowGroups.has(groupId)) return;
+    setWorkflowGroups((current) => new Set(current).add(groupId));
+    void (runGroupWorkflow(groupId) as Promise<void>).finally(() =>
+      setWorkflowGroups((current) => {
+        const next = new Set(current);
+        next.delete(groupId);
+        return next;
+      }),
+    );
+  };
+
+  // Canvas locking is no longer offered. Locks saved while it was available are
+  // released the first time this browser opens the project, parents first (a
+  // locked group blocks its children). Later locks from the Agent or the API
+  // are kept and can be released from the context menu. Run locks participate
+  // in persisted layout and are kept from the first open.
+  const unlockedOnOpen = useRef<string | null>(null);
+  useEffect(() => {
+    // The startup placeholder and empty projects have nothing to release.
+    if (unlockedOnOpen.current === doc.id || !doc.nodes.length) return;
+    unlockedOnOpen.current = doc.id;
+    const key = `opendirector.legacyLocksReleased:${doc.id}`;
+    try {
+      if (localStorage.getItem(key)) return;
+      localStorage.setItem(key, "1");
+    } catch {
+      return; // Without storage the open-time release could repeat; keep locks.
+    }
+    const managedIds = new Set<string>();
+    const locked = orderNodesForCanvas(doc.nodes).filter((node) => {
+      if (node.autoLayout || (node.parentId && managedIds.has(node.parentId))) {
+        managedIds.add(node.id);
+        return false;
+      }
+      return node.locked;
+    });
+    if (!locked.length) return;
+    command({
+      type: "batch",
+      commands: locked.map((node) => ({
+        type: "update-node",
+        id: node.id,
+        patch: { locked: false },
+      })),
+    });
+  }, [doc.id, doc.nodes]);
+
+  const desktop = !!window.opendirectorDesktop;
+  const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(() => {
+    try { return desktop && localStorage.getItem("opendirector.desktop.sidebar.v1") === "open"; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    if (!desktop) return;
+    try { localStorage.setItem("opendirector.desktop.sidebar.v1", desktopSidebarOpen ? "open" : "closed"); }
+    catch { notify(t("desktop.sidebar.saveFailed")); }
+  }, [desktop, desktopSidebarOpen]);
+  const createDesktopProject = () => {
+    const id = crypto.randomUUID();
+    void switchDocument(async () => {
+      const { projects } = await listWorkspaceProjects();
+      const names = new Set(projects.map(project => project.name));
+      const base = t("canvas.project.defaultName");
+      let name = base;
+      for (let suffix = 2; names.has(name); suffix++) name = `${base} ${suffix}`;
+      const project = await createWorkspaceProject(name, id);
+      const document = await openWorkspaceProject(project);
+      await saveWorkspaceDocument(document);
+      return document;
+    }).then(success => { if (success) setEditProjectNameId(id); });
+  };
+
+  const runLayoutGroup = doc.nodes.find(
+    (node) => node.id === menu?.nodeId && node.type === "group" && !node.parentId,
+  );
+  const hasManagedRuns = doc.nodes.some((node) => node.autoLayout === "run");
+  const applyRunLayout = async (action:
+    | { kind: "organize" }
+    | { kind: "toggle" | "lock"; group: CanvasNode },
+  ) => {
+    if (runLayoutPending.current || switchPending.current) return;
+    const projectId = doc.id;
+    const stillOpen = () =>
+      !switchPending.current && historyRef.current.present.id === projectId;
+    runLayoutPending.current = true;
+    try {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      if (!stillOpen()) return;
+      invalidateScheduledAutosave();
+      if (!(await persistCurrentDocument(
+        () => historyRef.current.present,
+        (document) => stillOpen() ? persist(document, false) : Promise.resolve(false),
+      )) || !stillOpen()) return;
+      const client = creationClient(projectId);
+      if (action.kind === "organize") {
+        await client.command("canvas.layoutRuns", {});
+        return;
+      }
+      const { group } = action;
+      const item = client.snapshot.canvasItems.find((item) => item.id === group.id);
+      if (
+        item?.kind !== "group" || item.parentId || item.locked || !item.visible ||
+        (item.autoLayout === "run") !== (group.autoLayout === "run")
+      ) {
+        notify(t("canvas.workspace.menu.runGroupChanged"));
+        return;
+      }
+      await client.command("canvas.update", {
+        itemId: item.id,
+        ...(action.kind === "lock" ? { locked: true } : {
+          autoLayout: group.autoLayout === "run" ? "free" : "run",
+        }),
+      }, [objectVersion("canvas_item", item)]);
+    } catch (error) {
+      if (stillOpen()) notify(errorMessage(error));
+    } finally {
+      runLayoutPending.current = false;
+    }
+  };
+  const [showSwitching, setShowSwitching] = useState(false);
+  useEffect(() => {
+    if (!switching) {
+      setShowSwitching(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowSwitching(true), 200);
+    return () => window.clearTimeout(timer);
+  }, [switching]);
+  const switchingStatus = switching && showSwitching
+    ? t("canvas.workspace.loading.switching")
+    : "";
+
+  const canvasItems = creationClient(doc.id).snapshot?.canvasItems;
+  const selectedGroup = single?.type === "group" ? canvasItems?.find((item) => item.id === single.id) : undefined;
+  const planNode = selectedGroup?.kind === "group" && selectedGroup.runPlanItemId
+    ? doc.nodes.find((node) => node.type === "text" && node.id === selectedGroup.runPlanItemId)
+    : undefined;
+  const viewingPublishedPlan = Boolean(textWindowNode && canvasItems?.some(
+    (item) => item.kind === "group" && item.runPlanItemId === textWindowNode.id,
+  ));
+
+  const workspace = (
+    <div
+      inert={!ready || switching || editHandoffPending}
+      aria-busy={!ready || switching}
+      className={`cw-workspace${panning ? " cw-workspace-panning" : ""}${spacePressed ? " cw-workspace-space-panning" : ""}`}
+      ref={root}
+      data-testid="canvas-workspace"
+      data-edit-mode={readOnly ? "preview" : "edit"}
+      data-desktop-sidebar={desktop && desktopSidebarOpen ? "open" : "closed"}
+      data-edge-motion={pageVisible}
+      data-assistant-open={assistantOpen}
+      data-assistant-resizing={assistantLayout.dragging}
+      data-canvas-interacting={interacting}
+      style={
+        {
+          "--assistant-width": `${assistantLayout.width}px`,
+          "--assistant-toolbar-offset": `${assistantLayout.toolbarOffset}px`,
+          "--assistant-top": assistantLayout.belowHeader ? "78px" : "14px",
+          "--cw-selection-padding": `${SELECTION_PADDING / zoom}px`,
+        } as CSSProperties
+      }
+      tabIndex={-1}
+      onPointerMove={references.hover}
+      onPointerLeave={() => {
+        references.hide();
+        setHoveredNode(null);
+      }}
+      onContextMenuCapture={(event) => {
+        // React Flow may open our menu from mouseup. Cancel the actual native
+        // contextmenu as well, including repeated right clicks on that menu.
+        if (
+          event.target instanceof Element &&
+          !event.target.closest(".cw-node-title-input") &&
+          event.target.closest(".react-flow,.cw-context-menu")
+        )
+          event.preventDefault();
+      }}
+      onPointerDownCapture={(event) => {
+        marqueeClick.current = false;
+        selectionAtPointerDown.current = selectedRef.current;
+        bypassSnapping.current = event.metaKey || event.ctrlKey;
+        const target = event.target as HTMLElement;
+        const surface = Boolean(target.closest(".react-flow"));
+        if (surface) selectionPresentation.userNavigation();
+        pointerGesture.current.begin(
+          event.pointerId,
+          event.clientX,
+          event.clientY,
+          surface,
+          panning,
+        );
+        if (
+          surface &&
+          !target.closest(
+            "button,input,textarea,select,video,audio,a,[contenteditable=true],.nodrag:not(.react-flow__handle)",
+          )
+        )
+          setInteracting(true);
+      }}
+      onClickCapture={(event) => {
+        if (pointerGesture.current.blocksClick(event.detail)) {
+          event.preventDefault();
+          // Let the pane consume the click ending a marquee. Otherwise its
+          // selection flag swallows the next edge/button click instead.
+          if (!marqueeClick.current) event.stopPropagation();
+          marqueeClick.current = false;
+        } else if (
+          !readOnly && event.detail === 2 &&
+          !pointerGesture.current.blocksDoubleClick() &&
+          !panning &&
+          (event.target as HTMLElement).classList.contains("react-flow__pane")
+        ) {
+          // In selection mode onPaneClick receives pointerup (detail=0).
+          // Read native click count here; the pan/zoom layer can consume dblclick.
+          setMenu({
+            mode: "create",
+            x: event.clientX,
+            y: event.clientY,
+            world: flow.screenToFlowPosition({
+              x: event.clientX,
+              y: event.clientY,
+            }),
+          });
+        }
+      }}
+      onDoubleClickCapture={(event) => {
+        const nodeClick = Boolean(
+          (event.target as HTMLElement).closest(".react-flow__node"),
+        );
+        if (
+          pointerGesture.current.blocksDoubleClick(nodeClick && !spacePressed)
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
+      onKeyDownCapture={(event) => {
+        if (!readOnly || event.key === "Escape" ||
+            (!event.metaKey && !event.ctrlKey && ["h", "v"].includes(event.key.toLowerCase())))
+          onWorkspaceKey(event);
+      }}
+      onKeyUpCapture={(event) => {
+        bypassSnapping.current = event.metaKey || event.ctrlKey;
+      }}
+      onDragOver={(event) => {
+        if (readOnly) return;
+        if ((event.target as HTMLElement).closest("[role=dialog]")) return;
+        if (event.dataTransfer.types.includes("Files")) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+        }
+      }}
+      onDrop={(event) => {
+        if (
+          readOnly || event.defaultPrevented ||
+          (event.target as HTMLElement).closest("[role=dialog]")
+        )
+          return;
+        if (event.dataTransfer.files.length) {
+          event.preventDefault();
+          uploadTarget.current = null;
+          void importFiles(
+            [...event.dataTransfer.files],
+            flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+          );
+        }
+      }}
+    >
+      <CanvasPlaybackProvider
+        blocked={
+          // Dragging a node is intentionally absent here: the video node keeps
+          // playing while the node is dragged. Only gestures that move the
+          // viewport or open another surface interrupt playback.
+          panning ||
+          references.connecting ||
+          Boolean(
+            editing ||
+            preview ||
+            activeAction ||
+            menu ||
+            libraryOpen ||
+            subjectImport,
+          )
+        }
+      >
+        <CanvasActionsContext.Provider value={actions}>
+          <CanvasFlowSurface
+            ref={flowSurface}
+            documentNodes={doc.nodes}
+            gesture={pointerGesture}
+            bypassSnapping={bypassSnapping}
+            proOptions={{ hideAttribution: true }}
+            nodes={pendingOutput ? existingOutput ? projected.nodes.map((node: { id: string }) => node.id === pendingOutput.id ? pendingOutput : node) : [...projected.nodes, pendingOutput] : projected.nodes}
+            edges={pendingOutput && outputSource && outputState && !projected.edges.some((edge: { source: string; target: string }) => edge.source === outputState.itemId && edge.target === pendingOutput.id)
+              ? [...projected.edges, {
+                  id: `timeline-pending:${pendingOutput.id}`, source: outputState.itemId, target: pendingOutput.id,
+                  type: "reference", hidden: !showEdges, selectable: false, deletable: false,
+                  data: { state: "provenance", description: t("errors.refEvidence.editSource"),
+                    sourceBounds: { ...outputSource.position, width: outputSource.width, height: outputSource.height },
+                    targetBounds: { ...pendingOutput.position, width: pendingOutput.width, height: pendingOutput.height },
+                  },
+                }]
+              : projected.edges}
+            nodeTypes={nodeTypes}
+            defaultViewport={doc.viewport}
+            edgeTypes={edgeTypes}
+            onNodesChange={(changes) => onNodesChange(changes.filter((change) => !(pendingOutput && "id" in change && change.id === pendingOutput.id)))}
+            onEdgesChange={(changes) => {
+              for (const c of changes)
+                if (c.type === "select")
+                  setSelectedEdges((ids) =>
+                    c.selected
+                      ? [...new Set([...ids, c.id])]
+                      : ids.filter((id) => id !== c.id),
+                  );
+            }}
+            onConnect={connect}
+            connectionLineComponent={CanvasConnectionLine}
+            onConnectStart={(event) => {
+              setMenu(null);
+              const point = "touches" in event ? event.touches[0] : event;
+              connectionStarted.current = point
+                ? { x: point.clientX, y: point.clientY }
+                : null;
+            }}
+            onConnectEnd={onConnectEnd}
+            connectOnClick={false}
+            elementsSelectable={!spacePressed && !references.connecting}
+            nodesDraggable={!readOnly && !spacePressed}
+            nodesConnectable={!readOnly && !spacePressed}
+            isValidConnection={(c) =>
+              !lockedIds.has(c.source) &&
+              !lockedIds.has(c.target) &&
+              canAddReference(doc, c.source, c.target)
+            }
+            onEdgeClick={(_, edge) => {
+              if (edge.id.startsWith("tool-")) return;
+              setSelected([]);
+              setMenu(null);
+            }}
+            onNodeClick={(event, node) => {
+              if (
+                pointerGesture.current.blocksClick(event.detail) ||
+                (event.target as HTMLElement).closest(
+                  "button,input,textarea,select,video,audio,a,[contenteditable=true],.nodrag",
+                )
+              )
+                return;
+              setMenu(null);
+              setSelectedEdges([]);
+              setDismissedComposer(null);
+              if (assistantOpen) setAssistantSelectionRequest((n) => n + 1);
+              // Keep focus on the canvas when selecting a node. Autofocusing
+              // the prompt intercepts keyboard shortcuts for selected nodes.
+              root.current?.focus({ preventScroll: true });
+              // Read modifiers from the gesture itself, including focus changes between clicks.
+              if (event.shiftKey || event.metaKey || event.ctrlKey) {
+                const ids = new Set(selectionAtPointerDown.current);
+                if (ids.has(node.id)) ids.delete(node.id);
+                else ids.add(node.id);
+                setSelected([...ids]);
+                return;
+              }
+              setSelected([node.id]);
+              focusSelection(node.id);
+            }}
+            onNodeDoubleClick={(event, node) => {
+              if (
+                spacePressed ||
+                (event.target as HTMLElement).closest(
+                  "button,input,textarea,select,video,audio,a,[contenteditable=true],.nodrag",
+                )
+              )
+                return;
+              setSelected([node.id]);
+              if (readOnly) {
+                const item = doc.nodes.find((entry) => entry.id === node.id);
+                if (item) void openEditor(item);
+                return;
+              }
+              if (node.type === "text" && !lockedIds.has(node.id)) {
+                setTextEditingId(node.id);
+                return;
+              }
+              focusSelection(node.id);
+            }}
+            onNodeContextMenu={(event, node) =>
+              actions.contextMenu(node.id, event)
+            }
+            onNodeMouseEnter={(_, node) => setHoveredNode(node.id)}
+            onNodeMouseLeave={() => setHoveredNode(null)}
+            onNodeDragStart={beginDrag}
+            onNodeDragStop={endDrag}
+            onSelectionDragStart={beginDrag}
+            onSelectionDragStop={endDrag}
+            onSelectionEnd={() => {
+              marqueeClick.current = true;
+              if (assistantOpen) setAssistantSelectionRequest((n) => n + 1);
+            }}
+            onPaneClick={(event) => {
+              if (pointerGesture.current.blocksClick(1)) return;
+              root.current?.focus({ preventScroll: true });
+              setMenu(null);
+              setSelected([]);
+              setDismissedComposer(null);
+              setSelectedEdges([]);
+              setZoomMenu(false);
+            }}
+            onPaneContextMenu={(event) => {
+              event.preventDefault();
+              if (readOnly) return;
+              // The pan layer also reports right-button releases over nodes.
+              // Let the shared node handler own that menu in either tool mode.
+              if ((event.target as Element).closest(".react-flow__node"))
+                return;
+              if (
+                panning ||
+                pointerGesture.current.moved ||
+                pointerGesture.current.cancelled
+              ) {
+                setMenu(null);
+                return;
+              }
+              root.current?.focus({ preventScroll: true });
+              setMenu({
+                x: event.clientX,
+                y: event.clientY,
+                world: flow.screenToFlowPosition({
+                  x: event.clientX,
+                  y: event.clientY,
+                }),
+              });
+            }}
+            onMoveStart={(event) => {
+              if (event) {
+                selectionPresentation.userNavigation();
+                viewportMoving.current = true;
+              }
+            }}
+            onMove={(event, view) => {
+              setZoom(view.zoom);
+              if (event) setMenu(null);
+            }}
+            onMoveEnd={(_, viewport) => {
+              viewportMoving.current = false;
+              command({ type: "viewport", viewport });
+            }}
+            minZoom={MIN_ZOOM}
+            maxZoom={MAX_ZOOM}
+            nodeDragThreshold={0}
+            nodeClickDistance={4}
+            selectionMode={SelectionMode.Partial}
+            selectionOnDrag={!panning}
+            panOnDrag={
+              references.connecting ? false : panning ? [0, 1, 2] : [1, 2]
+            }
+            panOnScroll
+            zoomOnScroll={false}
+            zoomOnPinch
+            zoomActivationKeyCode={["Meta", "Control"]}
+            panActivationKeyCode="Space"
+            multiSelectionKeyCode={["Meta", "Control", "Shift"]}
+            selectionKeyCode="Shift"
+            deleteKeyCode={null}
+            zoomOnDoubleClick={false}
+            colorMode="dark"
+            aria-label={t("canvas.workspace.aria.canvas")}
+          >
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={canvasDotGrid(zoom).gap}
+              size={canvasDotGrid(zoom).size}
+              color={theme.theme === "dark" ? "#55565d" : "#c7cbd2"}
+              bgColor={theme.theme === "dark" ? "#0d0d0d" : "#f7f8fa"}
+            />
+            <CanvasInteractionOverlay
+              guides={[]}
+              pending={
+                pendingBatchPreviews.length ? undefined : pendingConnection
+              }
+            />
+            <ViewportPortal>
+              <CreationRipples
+                documentId={doc.id}
+                nodes={doc.nodes}
+                zoom={zoom}
+                active={ready && !switching}
+              />
+              {selectionGeometry && !interacting && (
+                <div
+                  className="cw-multi-selection-frame"
+                  aria-hidden="true"
+                  style={{
+                    left: selectionGeometry.frame.x,
+                    top: selectionGeometry.frame.y,
+                    width: selectionGeometry.frame.width,
+                    height: selectionGeometry.frame.height,
+                    borderWidth: 1 / zoom,
+                    borderRadius: 10 / zoom,
+                  }}
+                />
+              )}
+              {referencePreviews.length > 0 && (
+                <svg className="cw-interaction-overlay">
+                  {referencePreviews.map((preview) => (
+                    <g
+                      key={preview.sourceId}
+                      data-reference-preview-source={preview.sourceId}
+                    >
+                      <CanvasConnectionPreview
+                        path={preview.path}
+                        invalid={Boolean(
+                          references.targetId &&
+                          actions.referenceTargetState(references.targetId) ===
+                            "invalid",
+                        )}
+                      />
+                    </g>
+                  ))}
+                </svg>
+              )}
+              {selectionGeometry && !interacting && !spacePressed && !menu && (
+                <button
+                  type="button"
+                  className="cw-reference-port cw-selection-reference-port nodrag nopan"
+                  aria-label={t("canvas.workspace.aria.batchConnect")}
+                  title={
+                    selectionReferenceReason ||
+                    t("canvas.workspace.aria.batchConnectHint")
+                  }
+                  disabled={
+                    Boolean(selectionReferenceReason) || references.disabled
+                  }
+                  style={{
+                    left:
+                      references.selectionPort?.x ?? selectionGeometry.port.x,
+                    top:
+                      references.selectionPort?.y ?? selectionGeometry.port.y,
+                    transform: `translate(-50%, -50%) scale(${1 / zoom})`,
+                    opacity: references.connecting ? 0 : undefined,
+                  }}
+                  onPointerDown={(event) =>
+                    references.startSelection(
+                      event,
+                      selectionNodes.map((node) => node.id),
+                      references.selectionPort ?? selectionGeometry.port,
+                    )
+                  }
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                >
+                  <CanvasIcon name="plus" size={SELECTION_PORT_SIZE * 0.6} />
+                </button>
+              )}
+              {selected.length < 2 &&
+                !menu &&
+                references.ports.map((port) => (
+                  <button
+                    key={`${port.nodeId}:${port.side}`}
+                    type="button"
+                    className="cw-reference-port cw-node-reference-port nodrag nopan"
+                    aria-label={
+                      port.active
+                        ? t("canvas.workspace.aria.addDownstream")
+                        : t("canvas.workspace.aria.addDownstreamSide", {
+                            side: t(referenceSideKeys[port.side]),
+                          })
+                    }
+                    data-reference-source={port.nodeId}
+                    data-side={port.side}
+                    data-direction={referencePortDirection(
+                      doc.nodes.find((node) => node.id === port.nodeId),
+                    )}
+                    data-active={port.active}
+                    style={{
+                      left: port.point.x,
+                      top: port.point.y,
+                      width: REFERENCE_PORT_SIZE,
+                      height: REFERENCE_PORT_SIZE,
+                      transform: `translate(-50%, -50%) scale(${portMetrics.scale})`,
+                      opacity: references.connecting ? 0 : 1,
+                    }}
+                    onPointerDown={(event) => references.start(event, port)}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                  >
+                    <CanvasIcon
+                      name={referencePortIcon(
+                        port.side,
+                        referencePortDirection(
+                          doc.nodes.find((node) => node.id === port.nodeId),
+                        ),
+                      )}
+                      size={REFERENCE_PORT_ICON_SIZE}
+                    />
+                  </button>
+                ))}
+            </ViewportPortal>
+          </CanvasFlowSurface>
+        </CanvasActionsContext.Provider>
+      </CanvasPlaybackProvider>
+
+      {minimap && (
+        <MiniMap
+          pannable
+          zoomable
+          nodeColor={(n) => (n.type === "text" ? "#8b887f" : "#59656c")}
+          maskColor={theme.theme === "dark" ? "#080809bb" : "#f7f8fabb"}
+          position="bottom-left"
+          style={{ bottom: 66, left: 12 }}
+        />
+      )}
+
+      {versionHistory?.projectId === doc.id && (
+        <NodeVersionHistory
+          key={`${doc.id}:${versionHistory.itemId}`}
+          projectId={doc.id}
+          itemId={versionHistory.itemId}
+          readOnly={readOnly}
+          anchor={versionHistory.anchor}
+          preparation={versionHistory.preparation}
+          onClose={() => setVersionHistory(null)}
+          onApplied={(referencesChanged) => {
+            setVersionHistory(null);
+            notify(
+              referencesChanged
+                ? t("canvas.workspace.toast.versionAppliedReferences")
+                : t("canvas.workspace.toast.versionApplied"),
+            );
+          }}
+        />
+      )}
+      <header className="cw-topbar">
+        <div className="cw-project-heading">
+          <img
+            className="cw-brand"
+            src={openDirectorLogoAnimation}
+            alt="OpenDirector"
+            draggable={false}
+          />
+          <ProjectSelector
+            currentId={doc.id}
+            editNameForId={editProjectNameId}
+            readOnly={readOnly}
+            name={projectDisplayName(t, doc.title, doc.defaultNameIndex)}
+            disabled={!ready || switching || projectRenaming}
+            onSelect={(project) =>
+              switchDocument(() => openWorkspaceProject(project))
+            }
+            onCreate={createDesktopProject}
+            onExamples={() => void openExamplePicker()}
+            onRename={renameCurrentProject}
+            onRenameProject={renameProject}
+            onDeleteProject={deleteProject}
+          />
+          <div
+            className="cw-language-toggle"
+            role="group"
+            aria-label={t("common.language")}
+          >
+            <button
+              type="button"
+              className={locale === "zh-CN" ? "is-active" : ""}
+              aria-pressed={locale === "zh-CN"}
+              onClick={() => setLocale("zh-CN")}
+            >
+              {t("common.chinese")}
+            </button>
+            <span aria-hidden="true">|</span>
+            <button
+              type="button"
+              className={locale === "en-US" ? "is-active" : ""}
+              aria-pressed={locale === "en-US"}
+              onClick={() => setLocale("en-US")}
+            >
+              {t("common.englishShort")}
+            </button>
+          </div>
+          <NodeInfoButton nodes={doc.nodes} />
+          {editingState?.mode === "preview" ? <>
+            <span className="cw-save-status" role="status">{t("canvas.workspace.preview.mode")}</span>
+            <button
+              type="button"
+              className="cw-edit-request"
+              disabled={editSession.working || editingState.handoff === "requested" || editingState.handoff === "busy"}
+              onClick={() => void editSession.request()}
+            >
+              {t(editingState.handoff === "requested" ? "canvas.workspace.preview.requested" :
+                editingState.handoff === "busy" ? "canvas.workspace.preview.busy" : "canvas.workspace.preview.request")}
+            </button>
+            {editSession.error && <span role="alert">{editSession.error}</span>}
+          </> : <span className="cw-save-status" title={saveStatusText}>
+            <i className={saveStatus.state === "saved" ? "saved" : ""} />
+            {desktop && desktopSidebarOpen ? saveStatusText : switchingStatus || saveStatusText}
+          </span>}
+          {saveStatus.state === "failed" && (
+            <div className="cw-save-conflict-actions">
+              <button onClick={() => void exportDocument()}>
+                {t("canvas.workspace.save.exportCopy")}
+              </button>
+              <button
+                onClick={() => {
+                  if (
+                    !window.confirm(
+                      t("canvas.workspace.save.reloadConfirm"),
+                    )
+                  )
+                    return;
+                  void workspaceProjection(doc.id)
+                    .open()
+                    .then((next) => {
+                      installDocument(next);
+                      setSaveStatus({ state: "saved" });
+                    })
+                    .catch((error) => notify(errorMessage(error)));
+                }}
+              >
+                {t("canvas.workspace.save.reload")}
+              </button>
+            </div>
+          )}
+        </div>
+        <div className="cw-top-actions">
+          <button
+            type="button"
+            className="cw-cmdk-pill"
+            title={t("canvas.palette.button")}
+            data-testid="topbar-command-palette-btn"
+            onClick={() => setPaletteOpen(true)}
+          >
+            ⌘K
+          </button>
+          {referenceAssets.length > 0 && (
+            <button
+              type="button"
+              className={`cw-ref-status-chip${referenceAlerts.length ? " is-alert" : ""}`}
+              data-testid="topbar-reference-status-chip"
+              onClick={() => setReferenceDialogOpen(true)}
+            >
+              {referenceAlerts.length
+                ? t("canvas.reference.badge.offline")
+                : `${t("canvas.reference.badge.online")} ${referenceAssets.length}`}
+            </button>
+          )}
+          <IconButton
+            name="clapperboard"
+            label={t("canvas.storyboard.button")}
+            tooltipSide="bottom"
+            active={storyboardOpen}
+            disabled={readOnly}
+            onClick={() => setStoryboardOpen(true)}
+          />
+          <IconButton
+            name="sparkle"
+            label={t("canvas.templates.button")}
+            tooltipSide="bottom"
+            active={templatesOpen}
+            disabled={readOnly}
+            onClick={() => setTemplatesOpen(true)}
+          />
+          <IconButton
+            name="folder"
+            label={t("canvas.reference.button")}
+            tooltipSide="bottom"
+            active={referenceDialogOpen}
+            disabled={readOnly}
+            onClick={() => setReferenceDialogOpen(true)}
+          />
+          <IconButton
+            name="model"
+            label={t("canvas.health.button")}
+            tooltipSide="bottom"
+            active={healthOpen}
+            onClick={() => setHealthOpen(true)}
+          />
+          <span ref={assetListAnchor} className="cw-asset-list-anchor">
+            <IconButton
+              name="search"
+              label={t("canvas.workspace.toolbar.assets")}
+              tooltipSide="bottom"
+              active={panel === "search"}
+              onClick={() => {
+                if (readOnly) {
+                  togglePanel("search");
+                  return;
+                }
+                void persist(historyRef.current.present, false).then(
+                  (saved) => {
+                    if (saved) togglePanel("search");
+                  },
+                );
+              }}
+            />
+          </span>
+          <IconButton
+            name="history"
+            label={t("canvas.workspace.toolbar.history")}
+            tooltipSide="bottom"
+            active={panel === "history"}
+            onClick={() => togglePanel("history")}
+          />
+          <IconButton
+            disabled={readOnly}
+            name="canvasImport"
+            label={t("canvas.workspace.toolbar.importCanvas")}
+            tooltipSide="bottom"
+            size={20}
+            onClick={() => importInput.current?.click()}
+          />
+          <IconButton
+            name="canvasExport"
+            label={t("canvas.workspace.toolbar.exportCanvas")}
+            tooltipSide="bottom"
+            size={20}
+            onClick={exportDocument}
+          />
+          {desktop && window.opendirectorDesktop?.showMore && <IconButton name="more" label={t("common.more")} tooltipSide="bottom"
+            onClick={() => window.opendirectorDesktop?.showMore?.()} />}
+          <input
+            ref={importInput}
+            type="file"
+            accept=".canvas,application/zip"
+            hidden
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = "";
+              if (file) void importDocument(file);
+            }}
+          />
+        </div>
+      </header>
+      {desktop && <DesktopSidebar open={desktopSidebarOpen} currentId={doc.id}
+        switchingStatus={switchingStatus}
+        disabled={!ready || switching || projectRenaming}
+        onToggle={() => setDesktopSidebarOpen(value => !value)}
+        onCreate={createDesktopProject}
+        onDelete={deleteProject}
+        onSelect={project => switchDocument(() => openWorkspaceProject(project))}
+        onSettings={() => setSettingsOpen(true)} />}
+      <CanvasToolRail
+        holdCollapsed={false}
+        items={[
+          ...CANVAS_CREATION_TOOLS.map((tool) => ({
+            name: tool.kind,
+            icon: tool.icon,
+            label: t(tool.labelKey),
+            actionLabel: tool.unavailable
+              ? t(tool.labelKey)
+              : t("canvas.rail.add", { label: t(tool.labelKey) }),
+            shortcut: tool.kind === "text" ? "T" : undefined,
+            unavailable: tool.unavailable,
+            onClick: tool.unavailable ? undefined : () => addNode(tool.kind),
+          })),
+          {
+            name: "folder",
+            icon: "rail-folder",
+            label: t("canvas.rail.assets"),
+            preserveCollapsedOnFocusRestore: true,
+            separatorBefore: true,
+            active: libraryOpen,
+            onClick: () => setLibraryOpen(true),
+          },
+          {
+            name: "upload",
+            icon: "rail-upload",
+            label: t("canvas.rail.upload"),
+            preserveCollapsedOnFocusRestore: true,
+            actionLabel: t("canvas.rail.uploadLocal"),
+            shortcut: navigator.platform.includes("Mac")
+              ? "Meta+O"
+              : "Control+O",
+            onClick: () => openFilePicker(),
+          },
+        ]}
+      />
+      {!doc.nodes.length && ready && (
+        <div className="cw-empty">
+          <div className="cw-aurora" />
+          <div className="cw-empty-orb">
+            <CanvasIcon name="clapperboard" size={56} />
+          </div>
+          <h1>{t("canvas.workspace.empty.title")}</h1>
+          <p>{t("canvas.workspace.empty.hint")}</p>
+          <div>
+            <button
+              disabled={readOnly}
+              onClick={() => {
+                setSettingsCategory("models");
+                setSettingsOpen(true);
+              }}
+            >
+              <CanvasIcon name="model" size={15} />
+              {t("canvas.workspace.empty.configureModels")}
+            </button>
+            <button
+              disabled={readOnly || exampleBusy}
+              onClick={() => void runExampleButton(IMAGE_EXAMPLE_ID)}
+            >
+              <CanvasIcon name="image" size={15} />
+              {t("canvas.workspace.empty.tryImage")}
+            </button>
+            <button
+              disabled={readOnly || exampleBusy}
+              onClick={() => void runExampleButton(VIDEO_EXAMPLE_ID)}
+            >
+              <CanvasIcon name="video" size={15} />
+              {t("canvas.workspace.empty.tryVideo")}
+            </button>
+            <button
+              disabled={readOnly}
+              data-testid="empty-workflow-templates-btn"
+              onClick={() => setTemplatesOpen(true)}
+            >
+              <CanvasIcon name="sparkle" size={15} />
+              {t("canvas.workspace.empty.templates")}
+            </button>
+            <button
+              disabled={readOnly}
+              data-testid="empty-storyboard-sheet-btn"
+              onClick={() => setStoryboardOpen(true)}
+            >
+              <CanvasIcon name="clapperboard" size={15} />
+              {t("canvas.storyboard.button")}
+            </button>
+          </div>
+          {exampleBusy && exampleButtonStatus && (
+            <div
+              className="cw-empty-example-status"
+              role="status"
+              aria-live="polite"
+            >
+              <progress
+                className="cw-example-progress"
+                aria-label={t("canvas.example.progress.label")}
+                {...(exampleProgress === null
+                  ? {}
+                  : {
+                      value: exampleButtonStatus.received ?? 0,
+                      max: exampleButtonStatus.total ?? 1,
+                    })}
+              />
+              <span>
+                {exampleButtonStatus.phase === "importing"
+                  ? t("canvas.example.state.importing")
+                  : exampleProgress === null
+                    ? t("canvas.example.state.downloading")
+                    : t("canvas.example.state.downloadingPercent", {
+                        percent: exampleProgress,
+                      })}
+              </span>
+            </div>
+          )}
+          {(exampleMissing || exampleButtonStatus?.phase === "failed") && (
+            <small className="cw-empty-example-error" role="alert">
+              {exampleMissing
+                ? t("canvas.example.error.unknown")
+                : exampleFailureText(t, exampleButtonStatus!)}
+            </small>
+          )}
+          <small>{t("canvas.workspace.empty.tagline")}</small>
+        </div>
+      )}
+      {!ready && <div className="cw-loading canvas-loading-message"><span className="canvas-loading-spinner" aria-hidden="true" />{t("canvas.workspace.loading.opening")}</div>}
+
+      <div className="cw-bottom-left">
+        <div className="cw-settings-control">
+          <IconButton
+            name="settings"
+            label={t("canvas.workspace.toolbar.settings")}
+            active={settingsOpen}
+            onClick={() => {
+              setZoomMenu(false);
+              setSettingsCategory("general");
+              setSettingsOpen(true);
+            }}
+          />
+        </div>
+        <div className="cw-bottom-controls">
+          <IconButton
+            name={hand ? "hand" : "pointer"}
+            label={hand ? t("canvas.workspace.toolbar.selectTool") : t("canvas.workspace.toolbar.handTool")}
+            shortcut={hand ? "V" : "H"}
+            tooltipDelay={0}
+            highlighted
+            onClick={() => changeTool(!hand)}
+          />
+          <IconButton
+            name="minimap"
+            label={minimap ? t("canvas.workspace.toolbar.hideMinimap") : t("canvas.workspace.toolbar.showMinimap")}
+            tooltipDelay={0}
+            active={minimap}
+            onClick={() => setMinimap(!minimap)}
+          />
+          <IconButton
+            name="connections"
+            label={showEdges ? t("canvas.workspace.toolbar.hideEdges") : t("canvas.workspace.toolbar.showEdges")}
+            tooltipDelay={0}
+            active={showEdges}
+            onClick={() => setShowEdges(!showEdges)}
+          />
+          <span className="cw-vline" />
+          <TooltipButton
+            className="cw-zoom-button"
+            label={t("canvas.workspace.toolbar.zoomOptions")}
+            aria-expanded={zoomMenu}
+            tooltipDelay={0}
+            onClick={() => setZoomMenu(!zoomMenu)}
+          >
+            {Math.round(zoom * 100)}%<CanvasIcon name="chevron" size={11} />
+          </TooltipButton>
+        </div>
+        <div className="cw-undo-controls">
+          <IconButton
+            name="undo"
+            label={t("canvas.workspace.toolbar.undo")}
+            shortcut={navigator.platform.includes("Mac") ? "⌘ Z" : "Ctrl Z"}
+            tooltipDelay={0}
+            disabled={readOnly || !businessHistory.undo || historyReplaying}
+            onClick={() => replayHistory()}
+          />
+          <IconButton
+            name="redo"
+            label={t("canvas.workspace.toolbar.redo")}
+            shortcut={
+              navigator.platform.includes("Mac") ? "⌘ ⇧ Z" : "Ctrl Shift Z"
+            }
+            tooltipDelay={0}
+            disabled={readOnly || !businessHistory.redo || historyReplaying}
+            onClick={() => replayHistory(true)}
+          />
+        </div>
+      </div>
+      {zoomMenu && (
+        <div className="cw-zoom-menu cw-menu-popover">
+          <div className="cw-zoom-row">
+            <IconButton
+              name="minus"
+              label={t("canvas.workspace.toolbar.zoomOut")}
+              onClick={() => {
+                selectionPresentation.userNavigation();
+                void flow.zoomOut();
+              }}
+            />
+            <input
+              aria-label={t("canvas.workspace.toolbar.zoomPercent")}
+              type="number"
+              min="8"
+              max="800"
+              value={Math.round(zoom * 100)}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (v >= 8 && v <= 800) {
+                  selectionPresentation.userNavigation();
+                  void flow.zoomTo(v / 100);
+                }
+              }}
+            />
+            <span>%</span>
+            <IconButton
+              name="plus"
+              label={t("canvas.workspace.toolbar.zoomIn")}
+              onClick={() => {
+                selectionPresentation.userNavigation();
+                void flow.zoomIn();
+              }}
+            />
+          </div>
+          <button
+            onClick={() => {
+              fit();
+              setZoomMenu(false);
+            }}
+          >
+            {t("canvas.workspace.toolbar.fitAll")} <kbd>⇧ 1</kbd>
+          </button>
+          <button
+            onClick={() => {
+              fit(true);
+              setZoomMenu(false);
+            }}
+          >
+            {t("canvas.workspace.toolbar.fitSelection")} <kbd>⇧ 2</kbd>
+          </button>
+          {[0.5, 1, 2].map((z) => (
+            <button
+              key={z}
+              onClick={() => {
+                selectionPresentation.userNavigation();
+                void flow.zoomTo(z);
+                setZoomMenu(false);
+              }}
+            >
+              {z * 100}%
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="cw-bottom-right">
+        <IconButton
+          name="help"
+          label={t("canvas.workspace.toolbar.help")}
+          shortcut="?"
+          onClick={() => setHelp(true)}
+        />
+        <button
+          className="cw-chat-button"
+          aria-controls="canvas-assistant"
+          aria-expanded={assistantOpen}
+          onClick={() =>
+            assistantOpen ? setAssistantOpen(false) : showAssistant()
+          }
+        >
+          <CanvasIcon name="star" size={18} />{t("canvas.workspace.toolbar.chat")}
+        </button>
+      </div>
+      {selectedEdges.length > 0 && selected.length === 0 && (
+        <div
+          className="cw-selection-bar"
+          role="toolbar"
+          aria-label={t("canvas.workspace.selection.edgeToolbar")}
+        >
+          <span>
+            {t("canvas.workspace.selection.edgesSelected", {
+              count: selectedEdges.length,
+            })}
+          </span>
+          <button
+            disabled={readOnly}
+            onClick={() => {
+              command({ type: "remove-edges", ids: selectedEdges });
+              setSelectedEdges([]);
+            }}
+          >
+            {t("canvas.workspace.selection.disconnectReference")}
+          </button>
+          <button onClick={() => setSelectedEdges([])}>{t("canvas.workspace.selection.clear")}</button>
+        </div>
+      )}
+      {selected.length > 1 && !interacting && !spacePressed && (
+        <SelectionBarAnchor nodes={selectedNodes} allNodes={doc.nodes}>
+          <span>
+            {t("canvas.workspace.selection.nodesSelected", {
+              count: selected.length,
+            })}
+          </span>
+          <select
+            disabled={readOnly}
+            aria-label={t("canvas.workspace.selection.align")}
+            value=""
+            onChange={(event) => {
+              const alignment = event.target.value as Alignment;
+              if (alignment)
+                change((document) => ({
+                  ...document,
+                  nodes: alignNodes(document.nodes, selected, alignment),
+                }));
+            }}
+          >
+            <option value="" disabled>
+              {t("canvas.workspace.selection.alignPlaceholder")}
+            </option>
+            <option value="left">{t("canvas.workspace.selection.alignLeft")}</option>
+            <option value="center">{t("canvas.workspace.selection.alignCenter")}</option>
+            <option value="right">{t("canvas.workspace.selection.alignRight")}</option>
+            <option value="top">{t("canvas.workspace.selection.alignTop")}</option>
+            <option value="middle">{t("canvas.workspace.selection.alignMiddle")}</option>
+            <option value="bottom">{t("canvas.workspace.selection.alignBottom")}</option>
+            <option value="horizontal" disabled={selected.length < 3}>
+              {t("canvas.workspace.selection.distributeHorizontal")}
+            </option>
+            <option value="vertical" disabled={selected.length < 3}>
+              {t("canvas.workspace.selection.distributeVertical")}
+            </option>
+          </select>
+          <button disabled={readOnly} onClick={group}>
+            <CanvasIcon name="group" size={16} />
+            {t("canvas.workspace.selection.group")}
+          </button>
+          <button disabled={readOnly} onClick={stack}>
+            <CanvasIcon name="stack" size={16} />
+            {t("canvas.workspace.selection.stack")}
+          </button>
+          <button
+            disabled={readOnly}
+            onClick={() =>
+              change((d) => ({
+                ...d,
+                nodes: arrangeNodes(d.nodes, selected),
+              }))
+            }
+          >
+            {t("canvas.workspace.selection.autoArrange")}
+          </button>
+          <IconButton
+            name="copy"
+            disabled={readOnly}
+            label={t("canvas.workspace.selection.duplicate")}
+            onClick={() => paste(true)}
+          />
+          <IconButton disabled={readOnly} name="trash" label={t("canvas.workspace.selection.deleteSelected")} onClick={removeSelected} />
+        </SelectionBarAnchor>
+      )}
+      {hasToolbar && single && (
+        <div
+          ref={toolbarElement}
+          className="cw-node-toolbar-anchor"
+          style={{
+            ...selectionPresentation.placement?.toolbar,
+            maxWidth: selectionPresentation.toolbarMaxWidth,
+          }}
+          data-interacting={
+            interacting ||
+            references.connecting ||
+            spacePressed ||
+            !selectionPresentation.visible
+          }
+          aria-hidden={
+            interacting ||
+            references.connecting ||
+            spacePressed ||
+            !selectionPresentation.visible
+          }
+          inert={
+            interacting ||
+            references.connecting ||
+            spacePressed ||
+            !selectionPresentation.visible
+          }
+        >
+          <NodeSelectionToolbar
+            key={`${single.id}:${toolRevision}`}
+            node={single}
+            locked={readOnly || lockedIds.has(single.id)}
+            style={{ maxWidth: selectionPresentation.toolbarMaxWidth }}
+            onOutput={single.type === "timeline" ? () => void timelineOutput.run(single, () => persist(doc, false)) : undefined}
+            outputBusy={timelineOutput.busy || !!(timelineOutput.blockedItemId && timelineOutput.blockedItemId !== single.id)}
+            onTool={openNodeAction}
+            presets={toolCatalog.capabilities["image-presets"]?.fields
+              ?.find((field) => field.key === "preset")?.options
+              ?.map((option) => ({ ...option, label: translateToolText(locale, option.label) }))}
+            onPreset={(preset) => {
+              const models = toolCatalog.capabilities["image-presets"]?.models?.["image.edit"] ?? [];
+              const selected = snapshotModel("image").settings?.modelConfigId;
+              const model = models.find((item) => item.id === selected) ?? models[0];
+              openNodeAction("image-presets", single, {
+                preset,
+                ...(model ? { imageModelConfigId: model.id } : {}),
+              });
+            }}
+            onCaptureFrame={(position) =>
+              void runQuickAction(
+                async (source, signal) => [
+                  await captureVideoEndpoint(
+                    source.src!,
+                    single.data.title,
+                    position,
+                    signal,
+                  ),
+                ],
+                "video-frame-capture",
+                { endpoint: position },
+              )
+            }
+            onGridSplit={(rows, columns) =>
+              void runQuickAction(
+                (source, signal) =>
+                  gridSplitImage(source, rows, columns, signal),
+                "grid-split",
+                { rows, columns },
+              )
+            }
+            onEdit={(mode) => {
+              if (single.type === "text") setTextEditingId(single.id);
+              else if (single.type === "video") {
+                if (mode === "extract-audio")
+                  void runQuickAction(
+                    async (source, signal) => [
+                      await extractVideoAudio(
+                        source.src!,
+                        single.data.title,
+                        undefined,
+                        signal,
+                      ),
+                    ],
+                    "extract-audio",
+                  );
+                else
+                  openNodeAction(
+                    mode === "frame" ? "video-frame-capture" : "video-trim",
+                  );
+              } else openEditor(single, mode);
+            }}
+            onPreview={() => setPreview(single)}
+            onDownload={() =>
+              single.type === "group" ? void downloadGroup(single) : downloadNode(single)
+            }
+            onRunWorkflow={single.type === "group" ? () => runWorkflow(single.id) : undefined}
+            workflowRunning={workflowGroups.has(single.id)}
+            onViewGroupPlan={planNode ? () => setTextWindowId(planNode.id) : undefined}
+            onUngroup={single.type === "group" ? ungroup : undefined}
+            onLayout={
+              single.type === "group" && !single.autoLayout
+                ? (layout: GroupLayout) => {
+                    if (doc.nodes.some((node) => node.parentId === single.id && lockedIds.has(node.id))) {
+                      notify(t("canvas.workspace.toast.unlockFirst"));
+                      return;
+                    }
+                    change((d) => layoutGroup(d, single.id, layout));
+                  }
+                : undefined
+            }
+            onGroupColor={
+              single.type === "group"
+                ? (color: string) =>
+                    command({
+                      type: "update-node",
+                      id: single.id,
+                      patch: { color: color || undefined },
+                    })
+                : undefined
+            }
+            onAssistant={showAssistant}
+            onExpand={
+              single.type === "text"
+                ? () => setTextWindowId(single.id)
+                : undefined
+            }
+            onDuplicate={() => { if (!readOnly) paste(true); }}
+          />
+        </div>
+      )}
+      {activeAction && actionNode && (
+        <>
+          <div
+            ref={setActionMedia}
+            className="cw-action-media-host"
+            style={selectionPresentation.mediaRect ?? undefined}
+            data-hidden={
+              interacting ||
+              references.connecting ||
+              spacePressed ||
+              !selectionPresentation.visible
+            }
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                closeAction();
+              }
+              event.stopPropagation();
+            }}
+          />
+          <div
+            ref={composerElement}
+            className="cw-composer-dock cw-node-action-dock"
+            data-tool={activeAction.tool}
+            style={{
+              ...selectionPresentation.placement?.composer,
+              width:
+                activeAction.tool === "image-presets"
+                  ? Math.min(470, selectionPresentation.composerWidth)
+                  : selectionPresentation.composerWidth,
+              maxHeight: selectionPresentation.composerMaxHeight,
+              transform: selectionPresentation.composerTransform,
+            }}
+            data-interacting={
+              interacting ||
+              references.connecting ||
+              spacePressed ||
+              !selectionPresentation.visible
+            }
+            inert={
+              interacting ||
+              references.connecting ||
+              spacePressed ||
+              !selectionPresentation.visible
+            }
+          >
+            {isImageActionTool(activeAction.tool) ? (
+              <ImageActionEditor
+                key={activeAction.token}
+                node={actionNode}
+                tool={activeAction.tool}
+                draft={actionNode.data.taskDraft}
+                mediaContainer={actionMedia}
+                onDraftChange={(task) => saveActionDraft(activeAction, task)}
+                onImportResults={(task) =>
+                  importActionResults(activeAction, task)
+                }
+                onApply={(outputs, task) =>
+                  addLinkedOutputs(activeAction, outputs, task)
+                }
+                onGenerate={
+                  toolCatalog.capabilities[activeAction.tool]?.available
+                    ? (task) => void runToolTask(activeAction, task)
+                    : undefined
+                }
+                unavailableReason={
+                  toolCatalog.capabilities[activeAction.tool]?.reason
+                }
+                models={
+                  toolCatalog.tools.find(
+                    (item) => item.id === activeAction.tool,
+                  )?.models["image.edit"]
+                }
+                selectionUnavailableReason={toolCatalog.selectionPreview.reason}
+                onPreviewSelection={
+                  toolCatalog.selectionPreview.available && actionNode.data.src
+                    ? async (query, signal) => {
+                        const src = actionNode.data.src!;
+                        const cached = selectionSource.current;
+                        const result = await previewImageSelection(
+                          {
+                            documentId: doc.id,
+                            documentTitle: doc.title,
+                            source: {
+                              kind: "image",
+                              title: actionNode.data.title,
+                              src,
+                            },
+                            sourceAssetId:
+                              cached?.documentId === doc.id &&
+                              cached.nodeId === actionNode.id &&
+                              cached.src === src
+                                ? cached.assetId
+                                : undefined,
+                            ...query,
+                          },
+                          signal,
+                        );
+                        signal.throwIfAborted();
+                        selectionSource.current = {
+                          documentId: doc.id,
+                          nodeId: actionNode.id,
+                          src,
+                          assetId: result.sourceAssetId,
+                        };
+                        return result;
+                      }
+                    : undefined
+                }
+                onClose={closeAction}
+              />
+            ) : actionNode.type === "video" ? (
+              <VideoActionEditor
+                key={activeAction.token}
+                node={actionNode}
+                tool={activeAction.tool}
+                nodes={doc.nodes}
+                draft={actionNode.data.taskDraft}
+                mediaContainer={actionMedia}
+                onDraftChange={(task) => saveActionDraft(activeAction, task)}
+                onImportResults={(task) =>
+                  importActionResults(activeAction, task)
+                }
+                onApply={(outputs, task) =>
+                  addLinkedOutputs(activeAction, outputs, task)
+                }
+                onGenerate={
+                  toolCatalog.capabilities[activeAction.tool]?.available
+                    ? (task) => void runToolTask(activeAction, task)
+                    : undefined
+                }
+                unavailableReason={
+                  toolCatalog.capabilities[activeAction.tool]?.reason
+                }
+                onClose={closeAction}
+              />
+            ) : (
+              <NodeTaskPanel
+                key={activeAction.token}
+                node={actionNode}
+                nodes={doc.nodes}
+                tool={activeAction.tool}
+                draft={actionNode.data.taskDraft}
+                initialParameters={activeAction.parameters}
+                onDraftChange={(task) => saveActionDraft(activeAction, task)}
+                onImportResults={(task) =>
+                  importActionResults(activeAction, task)
+                }
+                onClose={closeAction}
+                onEditSelection={() => {
+                  setMaskTool(activeAction.tool);
+                  openEditor(actionNode, "mask");
+                }}
+                capability={toolCatalog.capabilities[activeAction.tool]}
+                onGenerate={(task) => void runToolTask(activeAction, task)}
+              />
+            )}
+          </div>
+        </>
+      )}
+      {hasToolbar && single?.type === "timeline" && !lockedIds.has(single.id) && (
+        <TimelineOutputShortcut node={single} state={timelineOutput.state}
+          blocked={timelineOutput.busy && timelineOutput.state?.itemId !== single.id || !!(timelineOutput.blockedItemId && timelineOutput.blockedItemId !== single.id)}
+          onRun={() => void timelineOutput.run(single, () => persist(doc, false))} />
+      )}
+      {hasComposer && composerNode && composerNode.type !== "timeline" && (
+        <>
+          {composerExpanded && (
+            <div
+              className="cw-composer-backdrop"
+              aria-hidden="true"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                setExpandedComposerId(null);
+              }}
+            />
+          )}
+          <div
+            ref={composerElement}
+            className="cw-composer-dock"
+            data-preview-controls={readOnly}
+            data-expandable="true"
+            data-expanded={composerExpanded}
+            role={composerExpanded ? "dialog" : undefined}
+            aria-modal={composerExpanded ? true : undefined}
+            aria-label={composerExpanded ? t("canvas.workspace.aria.expandedComposer") : undefined}
+            style={
+              composerExpanded
+                ? undefined
+                : {
+                    ...selectionPresentation.placement?.composer,
+                    width: selectionPresentation.composerWidth,
+                    maxHeight: selectionPresentation.composerMaxHeight,
+                    transform: selectionPresentation.composerTransform,
+                  }
+            }
+            data-interacting={
+              !composerExpanded &&
+              (interacting ||
+                references.connecting ||
+                spacePressed ||
+                !selectionPresentation.visible)
+            }
+            aria-hidden={
+              !composerExpanded &&
+              (interacting ||
+                references.connecting ||
+                spacePressed ||
+                !selectionPresentation.visible)
+            }
+            inert={
+              readOnly ||
+              !composerExpanded &&
+              (interacting ||
+                references.connecting ||
+                spacePressed ||
+                !selectionPresentation.visible)
+            }
+            onKeyDownCapture={(event) => {
+              if (!composerExpanded || event.nativeEvent.isComposing) return;
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                setExpandedComposerId(null);
+                composerElement.current
+                  ?.querySelector<HTMLButtonElement>(".cw-composer-expand")
+                  ?.focus({ preventScroll: true });
+              } else if (event.key === "Tab") {
+                const controls = [
+                  ...event.currentTarget.querySelectorAll<HTMLElement>(
+                    'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[contenteditable="true"],[tabindex="0"]',
+                  ),
+                ].filter(
+                  (element) =>
+                    element.getClientRects().length &&
+                    !element.closest("[hidden],[inert]"),
+                );
+                const edge = event.shiftKey ? controls[0] : controls.at(-1);
+                if (document.activeElement === edge) {
+                  event.preventDefault();
+                  (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+                }
+              }
+            }}
+          >
+            <div className="cw-composer-window-controls">
+              <TooltipButton
+                type="button"
+                className="cw-composer-expand"
+                disabled={composerRunning}
+                label={composerExpanded ? t("canvas.workspace.composer.collapse") : t("canvas.workspace.composer.expand")}
+                aria-label={composerExpanded ? t("canvas.workspace.composer.collapse") : t("canvas.workspace.composer.expand")}
+                aria-expanded={composerExpanded}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() =>
+                  setExpandedComposerId(
+                    composerExpanded ? null : composerNode.id,
+                  )
+                }
+              >
+                <CanvasIcon
+                  name={composerExpanded ? "collapse" : "expand"}
+                  size={14}
+                />
+              </TooltipButton>
+              <TooltipButton
+                className="cw-composer-dismiss"
+                disabled={composerRunning}
+                label={t("canvas.workspace.composer.close")}
+                onClick={() => {
+                  setExpandedComposerId(null);
+                  setDismissedComposer(composerNode.id);
+                  root.current?.focus({ preventScroll: true });
+                }}
+              >
+                <CanvasIcon name="close" size={14} />
+              </TooltipButton>
+            </div>
+            {composerNode.type === "text" ? (
+              <TextNodeComposer
+                key={`${composerNode.id}:${toolRevision}`}
+                node={composerNode}
+                incoming={composerIncoming}
+                referenceControls={generationReferenceControls(composerNode)}
+                models={backendCatalog.models}
+                onCheckModels={backendCatalog.refreshAvailability}
+                onUpdate={(patch) =>
+                  command({
+                    type: "update-node",
+                    id: composerNode.id,
+                    patch: { data: patch },
+                  })
+                }
+                onRun={() => prepareGeneration(composerNode.id)}
+                onCancel={() => cancelServiceRuns(composerNode.id)}
+                onPickReference={() => {
+                  setExpandedComposerId(null);
+                  referenceTarget.current = composerNode.id;
+                  setLibraryOpen(true);
+                }}
+                running={composerRunning}
+              />
+            ) : (
+              <NodeComposer
+                key={`${composerNode.id}:${toolRevision}`}
+                selectedNode={composerNode}
+                incomingNodes={composerIncoming}
+                pinnedPrecheck={pinnedPrecheckNodes({
+                  node: composerNode,
+                  incoming: composerIncoming,
+                  assets: typeof submissionAssets === "function" ? submissionAssets() : [],
+                })}
+                referenceControls={generationReferenceControls(composerNode)}
+                onUpdate={(patch) =>
+                  command({
+                    type: "update-node",
+                    id: composerNode.id,
+                    patch: { data: patch },
+                  })
+                }
+                onRun={() => prepareGeneration(composerNode.id)}
+                onCancel={() => {
+                  cancelServiceRuns(composerNode.id);
+                }}
+                onPickReference={() => {
+                  setExpandedComposerId(null);
+                  referenceTarget.current = composerNode.id;
+                  setLibraryOpen(true);
+                }}
+                running={composerRunning}
+                lastOptimizedText={optimizedPrompts.current.get(
+                  `${doc.id}:${composerNode.id}`,
+                )}
+                onPromptOptimized={(text) => {
+                  optimizedPrompts.current.set(
+                    `${doc.id}:${composerNode.id}`,
+                    text,
+                  );
+                  notify(
+                    t("generation.optimize.toast", {
+                      shortcut: navigator.platform.includes("Mac")
+                        ? "⌘ + Z"
+                        : "Ctrl+Z",
+                    }),
+                  );
+                }}
+                onOptimizationNotice={(message, error) =>
+                  notify(message, { error })
+                }
+                onOptimizePrompt={async (data, signal) => {
+                  const current = historyRef.current.present;
+                  const active = assistantModel.current;
+                  if (active?.projectId !== current.id || !active.selection)
+                    throw new Error(t("generation.optimize.agentLoading"));
+                  if (!(await persist(current, false)))
+                    throw new Error(t("generation.optimize.saveFailed"));
+                  signal.throwIfAborted();
+                  return apiRequest<{ prompt: string; audioOmitted: boolean }>(
+                    `/creation/projects/${current.id}/items/${composerNode.id}/optimize-prompt`,
+                    {
+                      ...apiJson("POST", {
+                        ...data,
+                        preferredModelId: rt.assistantModels.agent ?? null,
+                        assistantModel: active.selection,
+                      }),
+                      signal,
+                    },
+                  );
+                }}
+                backendModels={backendCatalog.models}
+                onCheckModels={backendCatalog.refreshAvailability}
+                removeWatermark={backendCatalog.settings?.removeWatermark}
+                onConfigureModel={(kind) => {
+                  setSettingsCategory("models");
+                  setSettingsModelKind(kind);
+                  setSettingsOpen(true);
+                }}
+              />
+            )}
+          </div>
+        </>
+      )}
+
+      {menu && !menu.nodeId && !menu.connected && (
+        <CanvasCreationMenu
+          key={`${menu.x}:${menu.y}:${menu.mode ?? "context"}`}
+          x={menu.x}
+          y={menu.y}
+          mode={menu.mode ?? "context"}
+          canPaste={Boolean(clipboard.current?.nodes.length)}
+          canUndo={businessHistory.undo && !historyReplaying}
+          canRedo={businessHistory.redo && !historyReplaying}
+          onCreate={(kind) => addNode(kind, menu.world)}
+          onAssets={() => {
+            referenceTarget.current = null;
+            setAssistantOpen(false);
+            setLibraryOpen(true);
+          }}
+          onUpload={() => openFilePicker()}
+          onPaste={() => paste()}
+          onUndo={() => replayHistory()}
+          onRedo={() => replayHistory(true)}
+          onOrganizeRuns={hasManagedRuns ? () => void applyRunLayout({ kind: "organize" }) : undefined}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {menu &&
+        (menu.nodeId || menu.connected) &&
+        contextItems(
+          menu.nodeId ? (
+            <>
+              {menuButton(t("canvas.workspace.menu.rename"), "text", () => actions.rename(menu.nodeId!))}
+              <button
+                role="menuitem"
+                disabled={
+                  !doc.nodes.some(
+                    (n) =>
+                      n.id === menu.nodeId &&
+                      canStartReference(n) &&
+                      !lockedIds.has(n.id),
+                  )
+                }
+                onClick={() => actions.newConnected(menu.nodeId!, "source")}
+              >
+                <CanvasIcon name="plus" size={16} />
+                <span>{t("canvas.workspace.menu.addDownstream")}</span>
+              </button>
+              {menuButton(t("canvas.workspace.menu.copy"), "copy", copy, "⌘ C")}
+              {menuButton(t("canvas.workspace.menu.cut"), "copy", cut, "⌘ X")}
+              {menuButton(t("canvas.workspace.menu.paste"), "copy", () => paste(), "⌘ V")}
+              {menuButton(t("canvas.workspace.selection.duplicate"), "copy", () => paste(true), "⌘ D")}
+              <hr />
+              {menuButton(t("canvas.workspace.selection.group"), "group", group, "⌘ G")}
+              {selected.length > 1 && menuButton(t("canvas.workspace.kind.stack"), "stack", stack)}
+              {menuButton(t("canvas.workspace.menu.ungroup"), "group", ungroup, "⌘ ⇧ G")}
+              {runLayoutGroup && !lockedIds.has(runLayoutGroup.id) &&
+                menuButton(
+                  t(runLayoutGroup.autoLayout === "run"
+                    ? "canvas.workspace.menu.disableRunLayout"
+                    : "canvas.workspace.menu.enableRunLayout"),
+                  "map",
+                  () => void applyRunLayout({ kind: "toggle", group: runLayoutGroup }),
+                )}
+              {runLayoutGroup?.autoLayout === "run" && !lockedIds.has(runLayoutGroup.id) &&
+                menuButton(t("canvas.workspace.menu.lockRun"), "lock", () =>
+                  void applyRunLayout({ kind: "lock", group: runLayoutGroup }))}
+              {menuButton(t("canvas.workspace.selection.autoArrange"), "map", () =>
+                change((d) => ({
+                  ...d,
+                  nodes: arrangeNodes(d.nodes, selected),
+                })),
+              )}
+              <hr />
+              {/* Locking is not offered, but a node locked by the Agent, the API or an
+                  undo of the open-time unlock must still be recoverable. */}
+              {selected.some((id) => lockedIds.has(id)) &&
+                menuButton(t("canvas.workspace.menu.unlock"), "unlock", () => {
+                  const byId = new Map(doc.nodes.map((node) => [node.id, node]));
+                  const targets = new Set<string>();
+                  for (const id of selected)
+                    for (let node = byId.get(id); node; node = node.parentId ? byId.get(node.parentId) : undefined)
+                      if (node.locked) targets.add(node.id);
+                  command({
+                    type: "batch",
+                    commands: orderNodesForCanvas(doc.nodes)
+                      .filter((node) => targets.has(node.id))
+                      .map((node) => ({ type: "update-node" as const, id: node.id, patch: { locked: false } })),
+                  });
+                })}
+              {single?.type === "stack" &&
+                menuButton(t("canvas.workspace.menu.unstack"), "stack", () =>
+                  change((d) => unstackSelection(d, selected)),
+                )}
+              {single &&
+                ["image", "video", "audio", "file"].includes(single.type) &&
+                !lockedIds.has(single.id) &&
+                menuButton(
+                  single.data.src ? t("canvas.workspace.menu.replaceAsset") : t("canvas.workspace.menu.uploadAsset"),
+                  "upload",
+                  () => openFilePicker(single.id),
+                )}
+              {single?.data.src &&
+                menuButton(t("canvas.workspace.menu.downloadAsset"), "download", () => downloadNode(single))}
+              {single?.type === "image" &&
+                single.data.src &&
+                menuButton(t("canvas.workspace.menu.editImage"), "crop", () => openEditor(single))}
+              {single &&
+                ["timeline", "stack", "tool", "external"].includes(
+                  single.type,
+                ) &&
+                menuButton(t("canvas.workspace.menu.openEditor"), single.type, () => openEditor(single))}
+              {single?.data.src &&
+                ["image", "video", "audio"].includes(single.type) &&
+                menuButton(t("canvas.workspace.menu.editAsset"), "tool", () =>
+                  openNodeAction(
+                    single.data.taskDraft?.tool ??
+                      (single.type === "image"
+                        ? "smart-edit"
+                        : single.type === "video"
+                          ? "video-trim"
+                          : "audio-trim"),
+                  ),
+                )}
+              <hr />
+              {menuButton(t("canvas.workspace.menu.delete"), "trash", removeSelected, "⌫")}
+            </>
+          ) : (
+            <CreationMenuContent
+              allowedKinds={
+                menu.connected
+                  ? menu.connected.ids && menu.connected.ids.length > 1
+                    ? batchCreationKinds(
+                        doc,
+                        menu.connected.ids,
+                        CANVAS_CREATION_TOOLS.filter(
+                          (tool) => !tool.unavailable,
+                        ).map((tool) => tool.kind),
+                      )
+                    : connectedCreationKinds(
+                        doc,
+                        menu.connected.id,
+                        menu.connected.direction,
+                        CANVAS_CREATION_TOOLS.filter((t) => !t.unavailable).map(
+                          (t) => t.kind,
+                        ),
+                        { allowEmptySource: true },
+                      )
+                  : undefined
+              }
+              onCreate={(kind) => addNode(kind, menu.world)}
+              onAssets={() => setLibraryOpen(true)}
+              onUpload={() => openFilePicker()}
+            />
+          ),
+        )}
+
+      {panel === "search" && (
+        <CreationAssetList
+          key={`assets:${doc.id}`}
+          projectId={doc.id}
+          anchor={assetListAnchor.current}
+          position={center()}
+          onClose={() => setPanel(null)}
+          onLocate={(id) => {
+            void workspaceProjection(doc.id)
+              .read()
+              .then((next) => {
+                if (historyRef.current.present.id !== next.id) return;
+                const projection = workspaceProjection(next.id);
+                projection.baseline = next;
+                projection.basis = creationClient(next.id).snapshot;
+                setHistory((history) => ({ ...history, present: next }));
+                setSelected([id]);
+                requestAnimationFrame(
+                  () =>
+                    void flow.fitView({
+                      nodes: [{ id }],
+                      padding: 0.7,
+                      maxZoom: 1,
+                      duration: 200,
+                    }),
+                );
+              })
+              .catch((error) => notify(errorMessage(error)));
+          }}
+        />
+      )}
+      {panel && !(panel === "search") && (
+        <aside
+          className={`cw-side-panel ${panel === "assets" ? "from-left" : ""}`}
+          aria-label={
+            {
+              assets: t("canvas.workspace.panel.assets"),
+              search: t("canvas.workspace.panel.search"),
+              history: t("canvas.workspace.toolbar.history"),
+            }[panel]
+          }
+        >
+          <div className="cw-panel-heading">
+            <h2>
+              {
+                {
+                  assets: t("canvas.workspace.panel.assets"),
+                  search: t("canvas.workspace.panel.search"),
+                  history: t("canvas.workspace.toolbar.history"),
+                }[panel]
+              }
+            </h2>
+            <IconButton
+              name="close"
+              label={t("canvas.workspace.panel.close")}
+              onClick={() => {
+                setPanel(null);
+                referenceTarget.current = null;
+              }}
+            />
+          </div>
+          {panel === "assets" && (
+            <>
+              <p className="cw-panel-note">
+                {referenceTarget.current
+                  ? t("canvas.workspace.panel.referenceHint")
+                  : t("canvas.workspace.panel.assetsHint")}
+              </p>
+              <button
+                className="cw-wide-button"
+                disabled={readOnly}
+                onClick={() => openFilePicker()}
+              >
+                <CanvasIcon name="upload" />
+                {t("canvas.workspace.help.upload")}
+              </button>
+              <h3>{t("canvas.workspace.panel.canvasAssets")}</h3>
+              <div className="cw-asset-grid">
+                {[...doc.nodes, ...(doc.hiddenNodes ?? [])]
+                  .filter((n) => n.data.src)
+                  .map((n) => (
+                    <button
+                      key={n.id}
+                      onClick={() => {
+                        if (
+                          referenceTarget.current &&
+                          referenceTarget.current !== n.id &&
+                          doc.nodes.some(
+                            (item) => item.id === referenceTarget.current,
+                          )
+                        ) {
+                          const linked = referenceEdges(
+                            [n.id],
+                            referenceTarget.current,
+                          );
+                          if (linked.issue) {
+                            notify(linked.issue);
+                            return;
+                          }
+                          command({ type: "batch", commands: linked.commands });
+                          referenceTarget.current = null;
+                          setPanel(null);
+                        } else selectAndFocus(n);
+                      }}
+                    >
+                      {n.type === "image" ? (
+                        <AssetMedia as="img" src={n.data.src} alt={n.data.title} />
+                      ) : (
+                        <CanvasIcon name={n.type} size={34} />
+                      )}
+                      <span>{n.data.title}</span>
+                    </button>
+                  ))}
+              </div>
+              <button
+                className="cw-wide-button"
+                onClick={() => setLibraryOpen(true)}
+              >
+                <CanvasIcon name="folder" />
+                {t("canvas.workspace.panel.openLibrary")}
+              </button>
+              <h3>{t("canvas.workspace.panel.samples")}</h3>
+              <div className="cw-asset-grid">
+                {[
+                  t("canvas.workspace.sample.mountain"),
+                  t("canvas.workspace.sample.dusk"),
+                  t("canvas.workspace.sample.lake"),
+                ].map((title, i) => (
+                  <button
+                    key={title}
+                    onClick={() => {
+                      const target = referenceTarget.current;
+                      const n = addNode("image", undefined, {
+                        title,
+                        mediaRole: "asset",
+                        src: studyImage(i, title),
+                        assetState: "ready",
+                        mimeType: "image/svg+xml",
+                      });
+                      if (
+                        n &&
+                        target &&
+                        doc.nodes.some((item) => item.id === target)
+                      ) {
+                        const linked = referenceEdges([n.id], target, [n]);
+                        if (linked.issue) notify(linked.issue);
+                        else
+                          command({
+                            type: "batch",
+                            commands: linked.commands,
+                          });
+                        setSelected([target]);
+                        referenceTarget.current = null;
+                      }
+                    }}
+                  >
+                    <img src={studyImage(i, title)} alt={title} />
+                    <span>{title}</span>
+                  </button>
+                ))}
+              </div>
+              <small className="cw-panel-note">
+                {t("canvas.workspace.panel.samplesNote")}
+              </small>
+            </>
+          )}
+          {panel === "history" && (
+            <GenerationHistoryPanel
+              key={doc.id}
+              jobs={jobs}
+              authoritative={true}
+              onRestoreConfiguration={readOnly ? undefined : async (entry, referencePolicy) => {
+                try {
+                  if (!(await persist(historyRef.current.present))) return;
+                  const client = creationClient(doc.id),
+                    job = client.snapshot.jobs.find(
+                      (job) => job.id === entry.taskId,
+                    );
+                  if (!job) throw new Error(t("canvas.workspace.error.originalTaskMissing"));
+                  const spec = client.snapshot.generationSpecs.find(
+                    (spec) => spec.id === job.inputSnapshot.spec.id,
+                  )!;
+                  const history = await apiRequest<{
+                    jobs: {
+                      job: { id: string };
+                      configurationCommandId: string | null;
+                    }[];
+                  }>(`/creation/projects/${doc.id}/specs/${spec.id}/versions`);
+                  const commandId = history.jobs.find(
+                    (item) => item.job.id === job.id,
+                  )?.configurationCommandId;
+                  if (!commandId) throw new Error(t("canvas.workspace.error.configHistoryMissing"));
+                  await client.command(
+                    "generationSpec.restore",
+                    { specId: spec.id, commandId, referencePolicy },
+                    [
+                      {
+                        objectType: "generation_spec",
+                        id: spec.id,
+                        revision: spec.revision,
+                      },
+                      ...client.snapshot.references
+                        .filter((ref) => ref.targetSpecId === spec.id)
+                        .map((ref) => ({
+                          objectType: "reference" as const,
+                          id: ref.id,
+                          revision: ref.revision,
+                        })),
+                    ],
+                  );
+                  notify(t("canvas.workspace.toast.configRestored"));
+                } catch (error) {
+                  notify(errorMessage(error));
+                }
+              }}
+              onSync={
+                backendCatalog.connected
+                  ? () => void syncServiceResults()
+                  : undefined
+              }
+              onTaskAction={
+                backendCatalog.connected
+                  ? async (job, action) => {
+                      if (!job.taskId) return;
+                      try {
+                        if (job.tool) {
+                          if (action === "cancel")
+                            await cancelToolTask(doc.id, job.taskId);
+                          setJobs(await readJobs());
+                          return;
+                        }
+                        {
+                          if (action === "recover") await recoverServiceTask(job);
+                          else await creationClient(doc.id).control(job.taskId, action);
+                          return;
+                        }
+                      } catch (error) {
+                        notify(errorMessage(error));
+                      }
+                    }
+                  : undefined
+              }
+              onLocate={(id) => {
+                void (async () => {
+                  if (!(await persist(historyRef.current.present))) return;
+                  const client = creationClient(doc.id);
+                  await client.refresh();
+                  const item = client.snapshot.canvasItems.find(
+                    (item) => item.id === id,
+                  );
+                  if (!item) {
+                    notify(t("canvas.workspace.toast.configNotVisible"));
+                    return;
+                  }
+                  if (!visibleItems(client.snapshot).has(id)) {
+                    const versions = [objectVersion("canvas_item", item)];
+                    let parentId = item.parentId;
+                    while (parentId) {
+                      const parent = client.snapshot.canvasItems.find(
+                        (item) => item.id === parentId,
+                      )!;
+                      versions.push(objectVersion("canvas_item", parent));
+                      parentId = parent.parentId;
+                    }
+                    await client.command("canvas.show", { item }, versions);
+                  }
+                  const projection = workspaceProjection(doc.id),
+                    snapshot = client.snapshot,
+                    next = await projection.read(snapshot);
+                  const current = historyRef.current.present;
+                  if (
+                    current.id !== doc.id ||
+                    client.snapshot.eventCursor !== snapshot.eventCursor ||
+                    JSON.stringify([current.nodes, current.edges]) !==
+                      JSON.stringify([
+                        projection.baseline.nodes,
+                        projection.baseline.edges,
+                      ])
+                  )
+                    return;
+                  projection.baseline = next;
+                  projection.basis = snapshot;
+                  setHistory((history) => ({ ...history, present: next }));
+                  setSelected([id]);
+                  requestAnimationFrame(
+                    () =>
+                      void flow.fitView({
+                        nodes: [{ id }],
+                        padding: 0.7,
+                        maxZoom: 1,
+                        duration: 200,
+                      }),
+                  );
+                })().catch((error) => notify(errorMessage(error)));
+                return;
+              }}
+              onRestore={(entries, requests = false) => {
+                if (readOnly) return;
+                void (async () => {
+                  const toolEntries = entries.filter((entry) => entry.tool);
+                  if (toolEntries.length && !requests) {
+                    {
+                      if (!(await persist(historyRef.current.present))) return;
+                      const adoptedIds: string[] = [];
+                      for (const entry of toolEntries)
+                        if (entry.taskId) {
+                          const placed = await acknowledgeToolPlacement(
+                            doc.id,
+                            entry.taskId,
+                            "placed",
+                            "explicit",
+                          );
+                          adoptedIds.push(
+                            ...placed.outputs.map(
+                              (output) => output.canvasItemId,
+                            ),
+                          );
+                        }
+                      await creationClient(doc.id).refresh();
+                      setSelected(adoptedIds);
+                      revealResults(adoptedIds);
+                      setJobs(await readJobs());
+                    }
+                    entries = entries.filter((entry) => !entry.tool);
+                    if (!entries.length) return;
+                  }
+                  {
+                    void (async () => {
+                      if (requests) {
+                        notify(t("canvas.workspace.toast.useRestoreConfig"));
+                        return;
+                      }
+                      if (!(await persist(historyRef.current.present))) return;
+                      const client = creationClient(doc.id);
+                      await client.refresh();
+                      const results = client.snapshot.results.filter((result) =>
+                        entries.some((entry) => entry.taskId === result.jobId),
+                      );
+                      if (
+                        new Set(results.map((result) => result.specId)).size !==
+                        results.length
+                      ) {
+                        notify(t("canvas.workspace.toast.oneResultPerSpec"));
+                        return;
+                      }
+                      const specs = client.snapshot.generationSpecs.filter(
+                        (spec) =>
+                          results.some((result) => result.specId === spec.id),
+                      );
+                      const items = client.snapshot.canvasItems.filter(
+                        (item) =>
+                          item.binding.role === "generation" &&
+                          specs.some(
+                            (spec) =>
+                              item.binding.role === "generation" &&
+                              item.binding.objectRef.id === spec.id,
+                          ),
+                      );
+                      await client.batch(
+                        results.map((result) => ({
+                          type: "result.select",
+                          payload: {
+                            specId: result.specId,
+                            resultId: result.id,
+                          },
+                        })),
+                        [
+                          ...specs.map((spec) =>
+                            objectVersion("generation_spec", spec),
+                          ),
+                          ...items.map((item) =>
+                            objectVersion("canvas_item", item),
+                          ),
+                        ],
+                      );
+                    })().catch((error) => notify(errorMessage(error)));
+                    return;
+                  }
+                })().catch((error) => notify(errorMessage(error)));
+              }}
+            />
+          )}
+        </aside>
+      )}
+
+      {ready && !welcomeOpen && (
+        <AssistantPanel
+          key={doc.id}
+          documentId={doc.id}
+          readOnly={readOnly}
+          documentTitle={projectDisplayName(t, doc.title, doc.defaultNameIndex)}
+          catalog={backendCatalog}
+          nodes={[...doc.nodes, ...(doc.hiddenNodes ?? [])]}
+          visibleNodes={doc.nodes}
+          selectedNodes={doc.nodes.filter((node) => selected.includes(node.id))}
+          open={assistantOpen}
+          layout={assistantLayout}
+          selectionRequest={assistantSelectionRequest}
+          onClose={() => {
+            setAssistantOpen(false);
+            requestAnimationFrame(() =>
+              root.current
+                ?.querySelector<HTMLButtonElement>(".cw-chat-button")
+                ?.focus(),
+            );
+          }}
+          onTurnEnd={() => void syncServiceResults()}
+          onModelSelections={setAssistantModels}
+          onAgentModel={onAgentModel}
+          onPrepareReferences={() => persist(historyRef.current.present)}
+          onOpenSettings={() => {
+            setSettingsCategory("models");
+            setSettingsOpen(true);
+          }}
+        />
+      )}
+
+      <input
+        ref={fileInput}
+        className="sr-only"
+        type="file"
+        multiple
+        aria-label={t("canvas.workspace.aria.fileInput")}
+        onChange={(e) => {
+          if (e.target.files?.length) void importFiles([...e.target.files]);
+          e.target.value = "";
+        }}
+      />
+      <input
+        ref={resultInput}
+        className="sr-only"
+        type="file"
+        multiple
+        aria-label={t("canvas.workspace.aria.resultInput")}
+        onChange={(event) => {
+          if (event.target.files?.length)
+            void importActionResultFiles([...event.target.files]);
+          event.target.value = "";
+        }}
+      />
+      <CanvasNotifications notifications={notifications} onDismiss={dismiss} />
+      {textWindowNode && (
+        <TextNodeWindow
+          key={textWindowNode.id}
+          node={textWindowNode}
+          locked={lockedIds.has(textWindowNode.id)}
+          readOnly={viewingPublishedPlan}
+          selections={actions.textSelections}
+          onUpdate={(text) =>
+            command({
+              type: "update-node",
+              id: textWindowNode.id,
+              patch: { data: { text } },
+            })
+          }
+          onClose={() => {
+            setTextWindowId(null);
+            if (viewingPublishedPlan) {
+              root.current?.focus({ preventScroll: true });
+              return;
+            }
+            void persist(historyRef.current.present);
+            if (!lockedIds.has(textWindowNode.id)) setTextEditingId(textWindowNode.id);
+            else root.current?.focus({ preventScroll: true });
+          }}
+          onBeginEdit={begin}
+          onEndEdit={end}
+        />
+      )}
+      {preview && (
+        <div
+          className="cw-modal-backdrop cw-preview"
+          role="dialog"
+          aria-label={t("canvas.workspace.aria.previewDialog")}
+          onClick={() => setPreview(null)}
+        >
+          <header>
+            <span>{preview.data.title}</span>
+            <IconButton
+              name="download"
+              label={t("canvas.workspace.aria.downloadPreview")}
+              onClick={() => downloadNode(preview)}
+            />
+            <IconButton
+              name="close"
+              label={t("canvas.workspace.aria.closePreview")}
+              onClick={() => setPreview(null)}
+            />
+          </header>
+          <div onClick={(e) => e.stopPropagation()}>
+            {preview.type === "image" && preview.data.src ? (
+              <AssetMedia as="img" src={preview.data.src} alt={preview.data.title} />
+            ) : preview.type === "video" && preview.data.src ? (
+              <AssetMedia as="video" src={preview.data.src} controls />
+            ) : preview.type === "audio" && preview.data.src ? (
+              <AssetMedia as="audio" src={preview.data.src} controls />
+            ) : (
+              <p>
+                {preview.data.text ||
+                  (preview.data.src
+                    ? t("canvas.workspace.preview.fileHint")
+                    : t("canvas.workspace.preview.emptyHint"))}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+      {editing && editorMode === "default" && editing.type === "timeline" && (
+        <TimelineEditor
+          node={editing}
+          latestNode={doc.nodes.find((node) => node.id === editing.id)}
+          readOnly={readOnly}
+          onRefreshFromProject={() => {
+            if (readOnly) return;
+            const current = historyRef.current.present;
+            const node = current.nodes.find((node) => node.id === editing.id);
+            if (node) {
+              editorSession.current = new CreationEditorSession(
+                creationClient(current.id),
+                current,
+                node.id,
+              );
+              editorOrigin.current = captureEditorSource(current.id, node);
+              setEditing(node);
+            }
+          }}
+          resources={[
+            ...resources,
+            ...doc.nodes
+              .filter((node) => node.type === "text")
+              .map((node) => ({
+                id: `node:${node.id}`,
+                nodeId: node.id,
+                kind: "text" as const,
+                title: node.data.title,
+                text: node.data.text ?? "",
+                assetId: node.data.backendAssetId,
+                mimeType: "text/plain",
+              })),
+          ]}
+          onReadTextResource={async (resource) => {
+            const client = creationClient(doc.id);
+            const asset = client.snapshot.assets.find(
+              (asset) => asset.id === resource.assetId && asset.kind === "text",
+            );
+            if (!asset) throw new Error(t("timeline.text.sourceError"));
+            return {
+              title: resource.title,
+              mimeType: "text/plain",
+              src: await client.mediaUrl(asset.id),
+              asset: {
+                assetId: asset.id,
+                revision: asset.revision,
+                fingerprint: asset.fingerprint,
+                kind: "text",
+              },
+            };
+          }}
+          onReadMediaResource={(resource, signal) =>
+            ["image/heic", "image/heif"].includes(resource.mimeType ?? "")
+              ? creationClient(doc.id).originalMedia(resource.src ?? "", resource.mimeType, signal)
+              : readLocalResource(resource, signal)
+          }
+          onApply={(timeline) => commitEditorData({ timeline })}
+          onExportEditablePackage={async (timeline) => {
+            await commitEditorData({ timeline });
+            const session: CreationEditorSession = editorSession.current!;
+            const basis = session.projection.basis;
+            const item = basis.canvasItems.find(
+              (item) => item.id === editing.id,
+            );
+            if (!item || item.binding.role !== "editor")
+              throw new Error(t("timeline.package.targetMissing"));
+            const editorId = item.binding.objectRef.id;
+            const document = basis.editorDocuments.find(
+              (document) => document.id === editorId,
+            );
+            if (!document) throw new Error(t("timeline.package.targetMissing"));
+            return exportNativeTimelinePackage(
+              session.projection.client,
+              document.id,
+              document.revision,
+            );
+          }}
+          onPreparePackageImport={(file, replace) => {
+            const session: CreationEditorSession | null = editorSession.current;
+            if (!session) throw new Error(t("timeline.package.targetMissing"));
+            const client = session.projection.client;
+            const item = session.projection.basis.canvasItems.find(
+              (item) => item.id === session.itemId,
+            );
+            const editorId =
+              item?.binding.role === "editor"
+                ? item.binding.objectRef.id
+                : null;
+            const document = session.projection.basis.editorDocuments.find(
+              (document) => document.id === editorId,
+            );
+            if (replace && !document)
+              throw new Error(t("timeline.package.targetMissing"));
+            const operation = new TimelinePackageImport(
+              client,
+              file,
+              replace
+                ? { editorId: document!.id, revision: document!.revision }
+                : undefined,
+            );
+            return async () => {
+              if (
+                historyRef.current.present.id !== client.id ||
+                editorSaving.current
+              )
+                throw new Error(t("canvas.workspace.error.editorUnavailable"));
+              invalidateScheduledAutosave();
+              editorSaving.current = true;
+              try {
+                await saveQueue.current!.wait();
+                if (!(await persist(historyRef.current.present)))
+                  throw new Error(
+                    t("canvas.workspace.error.editorDraftSaveFailed"),
+                  );
+                await operation.run();
+                const projection = workspaceProjection(client.id);
+                const next = await projection.read(client.snapshot);
+                if (historyRef.current.present.id !== client.id)
+                  throw new Error(
+                    t("canvas.workspace.error.editorUnavailable"),
+                  );
+                const current = historyRef.current.present;
+                const merged = {
+                  ...next,
+                  viewport: current.viewport,
+                  settings: current.settings,
+                };
+                projection.baseline = merged;
+                projection.basis = client.snapshot;
+                setHistory((history) => ({ ...history, present: merged }));
+                if (replace) {
+                  const node = merged.nodes.find(
+                    (node) => node.id === session.itemId,
+                  );
+                  if (!node?.data.timeline)
+                    throw new Error(t("timeline.package.targetMissing"));
+                  editorSession.current = new CreationEditorSession(
+                    client,
+                    merged,
+                    node.id,
+                  );
+                  editorOrigin.current = captureEditorSource(client.id, node);
+                  setEditing(node);
+                  return node.data.timeline;
+                }
+              } finally {
+                editorSaving.current = false;
+                client.install(client.snapshot);
+              }
+            };
+          }}
+          onPrepareRender={async (timeline) => {
+            if ((await commitEditorData({ timeline })) === false)
+              throw new Error(t("canvas.workspace.error.timelineUnsaved"));
+            const client = creationClient(doc.id);
+            const publish = timelinePublication(
+              client,
+              editorSession.current!.projection.basis,
+              editing.id,
+            );
+            return async (result) => {
+              await publish(result);
+              client.install(client.snapshot);
+              notify(t("canvas.workspace.toast.compositeSaved"));
+              return true;
+            };
+          }}
+          onRender={(result) => editorOutputs([result])}
+          onClose={closeEditor}
+        />
+      )}
+      {editing && editorMode === "default" && editing.type === "stack" && (
+        <StackEditor
+          node={editing}
+          nodes={doc.nodes}
+          onApply={(stack) => {
+            return commitEditorData({ stack });
+          }}
+          onClose={closeEditor}
+          onSelectNode={(id) => {
+            const node = doc.nodes.find((node) => node.id === id);
+            if (node) selectAndFocus(node);
+          }}
+        />
+      )}
+      {editing && editorMode === "default" && editing.type === "tool" && (
+        <ToolEditor
+          node={editing}
+          onApply={(tool) => commitEditorData({ tool })}
+          onClose={closeEditor}
+        />
+      )}
+      {editing && editorMode === "default" && editing.type === "external" && (
+        <Suspense
+          fallback={
+            <EditorModal
+              title={t("canvas.workspace.director.opening")}
+              subtitle={t("canvas.workspace.director.subtitle")}
+              onClose={closeEditor}
+            >
+              <p>{t("canvas.workspace.director.loading")}</p>
+            </EditorModal>
+          }
+        >
+          <DirectorStage
+            onPrepareRender={async (localStage) => {
+              await commitEditorData({ localStage });
+              const origin = editorOrigin.current!;
+              const client = creationClient(doc.id);
+              mediaPublications.current.set(
+                origin,
+                new MediaPublication(client, client.snapshot, origin.nodeId),
+              );
+              return async (result) => addLinkedOutputs(origin, [result]);
+            }}
+            onRender={(result) => editorOutputs([result])}
+            node={editing}
+            onApply={(localStage, screenshot) =>
+              commitEditorData({
+                localStage,
+                ...(screenshot
+                  ? {
+                      src: screenshot,
+                      mimeType: "image/png",
+                      assetState: "ready",
+                      media: undefined,
+                    }
+                  : {}),
+              })
+            }
+            onClose={closeEditor}
+          />
+        </Suspense>
+      )}
+      {editing &&
+        editing.type === "image" &&
+        ["default", "layers"].includes(editorMode) && (
+          <ImageEditor
+            node={editing}
+            initialTab={editorMode === "layers" ? "layers" : "crop"}
+            initialLayers={editing.data.layers}
+            embedSourcesOnApply={false}
+            onClose={closeEditor}
+            onApply={(src, layers, crop) =>
+              commitEditorData({
+                src,
+                mimeType: "image/png",
+                assetState: "ready",
+                layers,
+                imageCrop: crop,
+                media: crop
+                  ? { width: crop.width, height: crop.height }
+                  : layers
+                    ? { width: layers.width, height: layers.height }
+                    : undefined,
+                taskDraft: undefined,
+              })
+            }
+          />
+        )}
+      {editing &&
+        editing.type === "image" &&
+        ["annotation", "grid", "mask"].includes(editorMode) && (
+          <LocalImageTools
+            node={editing}
+            mode={editorMode as "annotation" | "grid" | "mask"}
+            onClose={closeEditor}
+            onApply={(outputs, task) =>
+              editorOutputs(
+                outputs.map((output) => ({
+                  kind: "image",
+                  src: output.src,
+                  mimeType: output.mimeType,
+                  title: output.title,
+                  media: { width: output.width, height: output.height },
+                })),
+                task,
+              )
+            }
+            onSelection={(selection) => {
+              const origin = editorOrigin.current;
+              if (!origin) return;
+              const current = validateNodeActionSource(
+                historyRef.current.present,
+                origin,
+              );
+              if (!current.node) {
+                notify(current.error);
+                return;
+              }
+              const spec = CANVAS_TOOLS.find((tool) => tool.id === maskTool)!;
+              // The panel saved its latest parameters before opening this editor;
+              // editing is an older image snapshot and does not own that draft.
+              const previous =
+                current.node.data.taskDraft?.tool === maskTool
+                  ? current.node.data.taskDraft
+                  : undefined;
+              const draft =
+                previous ??
+                createCanvasToolTask(
+                  maskTool,
+                  [origin.nodeId],
+                  initialToolParameters(spec),
+                );
+              saveActionDraft(origin, { ...draft, selection });
+              setActionSession({
+                ...origin,
+                tool: maskTool,
+                token: crypto.randomUUID(),
+              });
+              focusSelection(origin.nodeId);
+            }}
+          />
+        )}
+      {editing &&
+        ["video", "audio"].includes(editing.type) &&
+        ["trim", "frame", "extract-audio", "crop"].includes(editorMode) && (
+          <LocalMediaEditor
+            node={editing}
+            mode={editorMode as "trim" | "frame" | "extract-audio" | "crop"}
+            onApply={(output, task) => editorOutputs([output], task)}
+            onClose={closeEditor}
+          />
+        )}
+      {firstRunArriving && (
+        <div className="cw-first-run-arrival" aria-hidden="true" onAnimationEnd={() => setFirstRunArriving(false)} />
+      )}
+      {welcomeOpen && !readOnly && <WelcomeScreen
+        catalog={backendCatalog}
+        projectId={doc.id}
+        exampleStatus={welcomeExampleId ? welcomeExampleImport.statuses[welcomeExampleId] : undefined}
+        onExamples={openWelcomeExample}
+        onSkip={finishFirstRun}
+        onCancelExample={() => {
+          if (welcomeExampleId) welcomeExampleImport.cancel(welcomeExampleId);
+        }}
+        onImport={async (files) => {
+          if (!(await importFiles(files, undefined, true))) {
+            throw new Error(t("canvas.workspace.error.importNotApplied"));
+          }
+          finishFirstRun();
+        }}
+        onCreate={async (selections) => {
+          const current = historyRef.current.present;
+          const selection = JSON.stringify(selections.map(({ capability, model }) => [capability, model.id]));
+          // Keep the same node identities when retrying an uncertain save.
+          if (pendingFirstNodes.current?.projectId !== current.id || pendingFirstNodes.current.selection !== selection) {
+            const origin = center();
+            const nodes = selections.map(({ capability, model }) => {
+              const kind = firstRunCapabilities[capability];
+              return createNode(kind, origin, { settings: newNodeGenerationSettings(kind, [model]) });
+            });
+            pendingFirstNodes.current = {
+              projectId: current.id,
+              selection,
+              nodes: arrangeNodes(nodes, nodes.map((node) => node.id)),
+            };
+          }
+          const { nodes } = pendingFirstNodes.current;
+          const missing = nodes.filter((node) => !current.nodes.some((item) => item.id === node.id));
+          if (missing.length) {
+            await commitCanvasCommand({
+              type: "batch",
+              commands: missing.map((node) => ({ type: "add-nodes", nodes: [node], titlePrefix: t(nodeKindKeys[node.type]) })),
+            }, t("firstRun.createFailed"));
+          }
+          finishFirstRun();
+          setSelected(nodes.map((node) => node.id));
+          if (nodes.length === 1) focusSelection(nodes[0].id);
+          else rt.revealCreatedNodes.current(nodes, [...current.nodes, ...missing]);
+        }}
+      />}
+      {settingsOpen && (
+        <SettingsDialog
+          catalog={backendCatalog}
+          theme={theme}
+          initialCategory={settingsCategory}
+          initialModelKind={settingsModelKind}
+          onClose={() => {
+            setSettingsModelKind(null);
+            setSettingsOpen(false);
+          }}
+        />
+      )}
+      {exampleEntries && (
+        <ExampleCanvasDialog
+          entries={exampleEntries}
+          onClose={() => setExampleEntries(null)}
+          onImport={(archive) => importCanvasArchive(archive)}
+        />
+      )}
+      <WorkflowTemplatesDialog
+        open={templatesOpen}
+        readOnly={readOnly}
+        onClose={() => setTemplatesOpen(false)}
+        onApply={(template) => {
+          const fragment = buildWorkflowTemplateFragment(template, t);
+          insertFragment(fragment, 0);
+          notify(
+            t("canvas.templates.applied", {
+              title: t(template.titleKey),
+              count: fragment.nodes.length,
+            }),
+          );
+          setTimeout(() => fit(true), 60);
+        }}
+      />
+      <ReferenceMediaDialog
+        open={referenceDialogOpen}
+        projectId={doc.id}
+        readOnly={readOnly}
+        onClose={() => setReferenceDialogOpen(false)}
+        onChanged={() => {
+          void creationClient(doc.id).refresh();
+          refreshReferenceAssets();
+        }}
+        onPlaceOnCanvas={placeReferencedAssetOnCanvas}
+        onNotify={notify}
+      />
+      <StoryboardSheetDialog
+        open={storyboardOpen}
+        readOnly={readOnly}
+        onClose={() => setStoryboardOpen(false)}
+        onGenerate={(rows) => {
+          const fragment = buildStoryboardCanvasFragment(rows, t);
+          insertFragment(fragment, 0);
+          notify(
+            t("canvas.storyboard.generated", {
+              count: rows.length,
+            }),
+          );
+          setTimeout(() => fit(true), 80);
+        }}
+      />
+      <CommandPalette
+        open={paletteOpen}
+        currentProjectId={doc.id}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+        onSelectProject={(project) =>
+          void switchDocument(() => openWorkspaceProject(project))
+        }
+        onOpenProjectWindow={
+          window.opendirectorDesktop?.openProjectWindow
+            ? (project) =>
+                void window.opendirectorDesktop?.openProjectWindow?.(project.id)
+            : undefined
+        }
+      />
+      <DesktopHealthDialog
+        open={healthOpen}
+        onClose={() => setHealthOpen(false)}
+        onNotify={notify}
+      />
+      {help && (
+        <div className="cw-modal-backdrop" onClick={() => setHelp(false)}>
+          <section
+            className="cw-modal cw-help"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-label={t("canvas.workspace.help.dialogLabel")}
+          >
+            <div className="cw-panel-heading">
+              <h2>{t("canvas.workspace.help.title")}</h2>
+              <IconButton
+                name="close"
+                label={t("canvas.workspace.help.close")}
+                onClick={() => setHelp(false)}
+              />
+            </div>
+            <p>
+              {t("canvas.workspace.help.body")}
+            </p>
+            <dl>
+              {helpShortcuts(navigator.platform.includes("Mac"), t).map(
+                ([name, key]) => (
+                  <div key={name}>
+                    <dt>{name}</dt>
+                    <dd>{key}</dd>
+                  </div>
+                ),
+              )}
+            </dl>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+  return (
+    <>
+      {workspace}
+      {subjectImport && (
+        <SubjectImportDialog
+          projectId={subjectImport.projectId}
+          targetId={subjectImport.nodeId}
+          initialTab={subjectImport.tab}
+          slot={subjectImport.slot}
+          targetIssue={
+            doc.id !== subjectImport.projectId
+              ? t("canvas.workspace.error.projectSwitched")
+              : (subjectImportSelection(doc, [subjectImport.nodeId]).issue ??
+                (() => {
+                  const target = doc.nodes.find(
+                    (node) => node.id === subjectImport.nodeId,
+                  );
+                  return target &&
+                    subjectTargetIdentity(target) !== subjectImport.identity
+                    ? t("canvas.workspace.error.subjectTargetChanged")
+                    : null;
+                })())
+          }
+          busy={subjectLibraryBusy || switching || projectRenaming}
+          onClose={() => setSubjectImport(null)}
+          onConfirm={confirmSubjectImport}
+        />
+      )}
+      {libraryOpen && (
+        <AssetLibraryDialog
+          readOnly={readOnly}
+          currentId={doc.id}
+          liveCanvas={liveCanvas}
+          subjectBusy={subjectLibraryBusy || switching || projectRenaming}
+          backupSubjectIssue={
+            single?.type === "subject" &&
+            single.data.subject?.main?.src &&
+            single.data.assetState !== "missing"
+              ? null
+              : t("canvas.workspace.error.selectSingleSubject")
+          }
+          onImportSubjects={(items) => importLibrarySubjects(items)}
+          onBackupSubject={backupLibrarySubject}
+          onClose={() => {
+            setLibraryOpen(false);
+            referenceTarget.current = null;
+          }}
+          onImportCanvas={importCanvasSource}
+          onInsert={insertLibraryItems}
+        />
+      )}
+      {!ready && (
+        <div className="canvas-loading-screen" role="status">
+          {initializationError ? (
+            <div role="alert">
+              <p>{initializationError}</p>
+              <button onClick={() => window.location.reload()}>{t("canvas.workspace.loading.reconnect")}</button>
+              <a href="/">{t("canvas.workspace.loading.backHome")}</a>
+            </div>
+          ) : (
+            <span className="canvas-loading-message">
+              <span className="canvas-loading-spinner" aria-hidden="true" />
+              {t("canvas.workspace.loading.opening")}
+            </span>
+          )}
+        </div>
+      )}
+
+    </>
+  );}
