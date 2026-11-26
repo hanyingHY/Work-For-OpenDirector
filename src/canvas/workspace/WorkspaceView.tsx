@@ -59,8 +59,13 @@ import "../windows-features.css";
 import { CreationRipples } from "../CreationRipples.tsx";
 import { CommandPalette, type PaletteCommand } from "../CommandPalette.tsx";
 import { DesktopHealthDialog } from "../DesktopHealthDialog.tsx";
+import { DirectorCameraDialog } from "../DirectorCameraDialog.tsx";
+import { MediaCompareDialog } from "../MediaCompareDialog.tsx";
+import { ProductionStudioDialog } from "../ProductionStudioDialog.tsx";
 import { ReferenceMediaDialog } from "../ReferenceMediaDialog.tsx";
 import { StoryboardSheetDialog } from "../StoryboardSheetDialog.tsx";
+import { VideoBreakdownDialog } from "../VideoBreakdownDialog.tsx";
+import { VirtualCrewDialog } from "../VirtualCrewDialog.tsx";
 import { WorkflowTemplatesDialog } from "../WorkflowTemplatesDialog.tsx";
 import { buildStoryboardCanvasFragment } from "../storyboardSheet.ts";
 import {
@@ -363,6 +368,11 @@ export function WorkspaceView({ rt, editingState, editSession }: {
   const [storyboardOpen, setStoryboardOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [healthOpen, setHealthOpen] = useState(false);
+  const [crewOpen, setCrewOpen] = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [breakdownOpen, setBreakdownOpen] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [studioOpen, setStudioOpen] = useState(false);
   const [referenceAssets, setReferenceAssets] = useState<ReferenceMediaAsset[]>([]);
   const insertFragment = rt.insertFragment;
 
@@ -457,9 +467,85 @@ export function WorkspaceView({ rt, editingState, editSession }: {
     [doc.id, doc.nodes.length, syncServiceResults, refreshReferenceAssets, fit, t],
   );
 
+  const placeAssetIdsOnCanvas = useCallback(
+    async (entries: Array<{ assetId: string; title: string }>) => {
+      const client = creationClient(doc.id);
+      await client.refresh();
+      const baseCount = doc.nodes.length;
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        const asset = client.snapshot.assets.find((a) => a.id === entry.assetId);
+        if (!asset) continue;
+        const col = (baseCount + i) % 3;
+        const row = Math.floor((baseCount + i) / 3);
+        const node = createNode(
+          asset.kind as "image" | "video" | "audio",
+          { x: 140 + col * 390, y: 120 + row * 280 },
+          { title: entry.title },
+        );
+        const item = {
+          id: node.id,
+          projectId: doc.id,
+          revision: 1,
+          kind: asset.kind,
+          title: entry.title,
+          position: node.position,
+          width: node.width,
+          height: node.height,
+          zIndex: 0,
+          locked: false,
+          visible: true,
+          parentId: null,
+          tags: [],
+          editors: [],
+          binding: { role: "material", objectRef: assetReference(asset) },
+        } as CanvasItem;
+        await client.command("canvas.show", { item });
+      }
+      await syncServiceResults();
+      setTimeout(() => fit(true), 80);
+    },
+    [doc.id, doc.nodes.length, syncServiceResults, fit],
+  );
+
   const referenceAlerts = referenceAssets.filter((r) => r.availability !== "online");
 
   const paletteCommands: PaletteCommand[] = [
+    {
+      id: "crew",
+      group: "workflows",
+      label: t("canvas.palette.cmd.crew"),
+      keywords: "crew action story kaiji script film auto direct",
+      onRun: () => setCrewOpen(true),
+    },
+    {
+      id: "camera",
+      group: "workflows",
+      label: t("canvas.palette.cmd.camera"),
+      keywords: "camera lighting prompt optimizer arri red dolly orbit lens",
+      onRun: () => setCameraOpen(true),
+    },
+    {
+      id: "breakdown",
+      group: "workflows",
+      label: t("canvas.palette.cmd.breakdown"),
+      keywords: "ffmpeg breakdown scene cut tail frame probe vertical 9:16 cfr grain",
+      onRun: () => setBreakdownOpen(true),
+    },
+    {
+      id: "compare",
+      group: "workflows",
+      label: t("canvas.palette.cmd.compare"),
+      keywords: "compare ab split slider variant branch winner flora weavy",
+      onRun: () => setCompareOpen(true),
+    },
+    {
+      id: "studio",
+      group: "workflows",
+      label: t("canvas.palette.cmd.studio"),
+      keywords: "bible character budget cost premiere davinci fcpxml srt pitch deck recipe odflow",
+      onRun: () => setStudioOpen(true),
+    },
     {
       id: "storyboard",
       group: "workflows",
@@ -1439,6 +1525,35 @@ export function WorkspaceView({ rt, editingState, editSession }: {
           <button
             type="button"
             className="cw-cmdk-pill"
+            title={t("canvas.crew.button")}
+            data-testid="topbar-crew-btn"
+            disabled={readOnly}
+            onClick={() => setCrewOpen(true)}
+          >
+            ✦ {t("canvas.crew.button")}
+          </button>
+          <button
+            type="button"
+            className="cw-cmdk-pill"
+            title={t("canvas.camera.button")}
+            data-testid="topbar-camera-btn"
+            disabled={readOnly}
+            onClick={() => setCameraOpen(true)}
+          >
+            🎥
+          </button>
+          <button
+            type="button"
+            className="cw-cmdk-pill"
+            title={t("canvas.studio.button")}
+            data-testid="topbar-studio-btn"
+            onClick={() => setStudioOpen(true)}
+          >
+            NLE / Bible
+          </button>
+          <button
+            type="button"
+            className="cw-cmdk-pill"
             title={t("canvas.palette.button")}
             data-testid="topbar-command-palette-btn"
             onClick={() => setPaletteOpen(true)}
@@ -1620,6 +1735,23 @@ export function WorkspaceView({ rt, editingState, editSession }: {
             >
               <CanvasIcon name="video" size={15} />
               {t("canvas.workspace.empty.tryVideo")}
+            </button>
+            <button
+              disabled={readOnly}
+              className="cw-empty-action-pill is-hero"
+              data-testid="empty-virtual-crew-btn"
+              onClick={() => setCrewOpen(true)}
+            >
+              <CanvasIcon name="sparkle" size={15} />
+              {t("canvas.crew.button")}
+            </button>
+            <button
+              disabled={readOnly}
+              data-testid="empty-camera-studio-btn"
+              onClick={() => setCameraOpen(true)}
+            >
+              <CanvasIcon name="video" size={15} />
+              {t("canvas.camera.button")}
             </button>
             <button
               disabled={readOnly}
@@ -3546,6 +3678,109 @@ export function WorkspaceView({ rt, editingState, editSession }: {
       <DesktopHealthDialog
         open={healthOpen}
         onClose={() => setHealthOpen(false)}
+        onNotify={notify}
+      />
+      <VirtualCrewDialog
+        open={crewOpen}
+        readOnly={readOnly}
+        onClose={() => setCrewOpen(false)}
+        onDeploy={(fragment) => {
+          insertFragment(fragment, 0);
+          notify(t("canvas.crew.deployed", { count: fragment.nodes.length }));
+          setTimeout(() => fit(true), 80);
+        }}
+      />
+      <DirectorCameraDialog
+        open={cameraOpen}
+        readOnly={readOnly}
+        initialPrompt={
+          single
+            ? String(
+                (single.data as { prompt?: string; text?: string }).prompt ??
+                  (single.data as { text?: string }).text ??
+                  "",
+              )
+            : ""
+        }
+        onClose={() => setCameraOpen(false)}
+        onNotify={notify}
+        onApply={({ optimizedPrompt, summary }) => {
+          if (single && (single.type === "text" || single.type === "image" || single.type === "video")) {
+            const dataPatch =
+              single.type === "text"
+                ? { text: optimizedPrompt }
+                : { prompt: optimizedPrompt };
+            command({ type: "update-node", id: single.id, patch: { data: dataPatch } });
+          } else {
+            const created = createNode(
+              "video",
+              { x: 140, y: 120 },
+              { title: `Director Shot · ${summary}`, prompt: optimizedPrompt },
+            );
+            insertFragment({ nodes: [created], edges: [] }, 0);
+          }
+          notify(t("canvas.camera.applied"));
+          setTimeout(() => fit(true), 80);
+        }}
+      />
+      <VideoBreakdownDialog
+        open={breakdownOpen}
+        projectId={doc.id}
+        readOnly={readOnly}
+        onClose={() => setBreakdownOpen(false)}
+        onNotify={notify}
+        onPlaceFrames={(sourceName, frames, mode) => {
+          void placeAssetIdsOnCanvas(
+            frames.map((f) => ({
+              assetId: f.assetId,
+              title:
+                mode === "last_frame"
+                  ? `${sourceName} · Tail Frame (${f.timestampSec}s)`
+                  : `${sourceName} · Shot ${String(f.index).padStart(2, "0")} (${f.timestampSec}s)`,
+            })),
+          );
+        }}
+        onPlaceVideo={(result) => {
+          void placeAssetIdsOnCanvas([{ assetId: result.assetId, title: result.name }]);
+        }}
+      />
+      <MediaCompareDialog
+        open={compareOpen}
+        readOnly={readOnly}
+        nodes={doc.nodes}
+        basePrompt={
+          single
+            ? String(
+                (single.data as { prompt?: string; text?: string }).prompt ??
+                  (single.data as { text?: string }).text ??
+                  "",
+              )
+            : ""
+        }
+        onClose={() => setCompareOpen(false)}
+        onSpawnBranches={(fragment) => {
+          insertFragment(fragment, 0);
+          notify(t("canvas.compare.spawned"));
+          setTimeout(() => fit(true), 80);
+        }}
+        onPickWinner={(nodeId, label) => {
+          const clean = label.replace(/^★\s*/, "");
+          command({ type: "update-node", id: nodeId, patch: { data: { title: `★ ${clean}` } } });
+          notify(t("canvas.compare.picked", { name: clean }));
+        }}
+      />
+      <ProductionStudioDialog
+        open={studioOpen}
+        projectId={doc.id}
+        projectTitle={doc.title}
+        readOnly={readOnly}
+        nodes={doc.nodes}
+        edges={doc.edges}
+        onClose={() => setStudioOpen(false)}
+        onInsertFragment={(fragment) => {
+          insertFragment(fragment, 0);
+          setTimeout(() => fit(true), 80);
+        }}
         onNotify={notify}
       />
       {help && (
